@@ -40,13 +40,6 @@ spotify_playing: bool | None = None
 mcp = FastMCP("arya-device", host="127.0.0.1", port=5002, streamable_http_path="/mcp")
 
 
-async def _read_whatsapp(contact: str, n: int) -> dict[str, Any]:
-    opened = whatsapp.search_contact(contact)
-    if not opened.get("success"):
-        return opened
-    return whatsapp.read_last_messages(n)
-
-
 @mcp.tool()
 async def spotify_play(query: str) -> dict[str, Any]:
     """Search Spotify and play the best matching result."""
@@ -147,14 +140,6 @@ async def open_documents() -> dict[str, Any]:
 async def whatsapp_send(contact: str, message: str) -> dict[str, Any]:
     """Send a WhatsApp message to a named contact."""
     return await queue.run(whatsapp.send_message, contact, message)
-
-
-@mcp.tool()
-async def whatsapp_read(contact: str, n: int = 5) -> dict[str, Any]:
-    """Open a WhatsApp contact and read its latest messages using legacy OCR."""
-    if not 1 <= n <= 50:
-        raise ValueError("n must be between 1 and 50")
-    return await queue.run(_read_whatsapp, contact, n)
 
 
 @mcp.tool()

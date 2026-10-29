@@ -1,9 +1,12 @@
 import asyncio
 import importlib
+import inspect
+import json
 import sys
 import threading
 import time
 from types import ModuleType
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -136,7 +139,7 @@ def test_fastmcp_registers_typed_device_tools_and_mocked_win32_focus(monkeypatch
     assert names == {
         "spotify_play", "spotify_pause", "spotify_resume", "spotify_next", "spotify_previous",
         "open_app", "close_app", "set_volume", "type_text", "take_screenshot", "lock_screen",
-        "open_downloads", "open_documents", "whatsapp_send", "whatsapp_read",
+        "open_downloads", "open_documents", "whatsapp_send",
         "whatsapp_voice_call", "vscode_open", "vscode_open_file", "vscode_search",
         "vscode_run_command", "vscode_format",
     }
@@ -148,6 +151,66 @@ def test_fastmcp_registers_typed_device_tools_and_mocked_win32_focus(monkeypatch
     assert server.vscode.focus_vscode() is True
     assert ("foreground", (1,)) in gui_calls
     assert win32gui.GetWindowText(1) == "Visual Studio Code"
+
+
+@pytest.mark.asyncio
+async def test_every_device_tool_returns_plain_json_dict_through_mocked_layer(monkeypatch):
+    server, _, _, _ = load_device_server(monkeypatch)
+    server.queue = SerialDesktopQueue(action_timeout=2)
+    success = lambda *args: {"success": True, "args": list(args)}
+    server.desktop = SimpleNamespace(
+        spotify_search=success,
+        spotify_play_pause=success,
+        spotify_next=success,
+        spotify_previous=success,
+        open_app=success,
+        close_app=success,
+        set_volume=success,
+        type_text=success,
+        take_screenshot=success,
+        lock_screen=success,
+        open_downloads=success,
+        open_documents=success,
+    )
+    server.whatsapp = SimpleNamespace(send_message=success, click_voice_call=success)
+    server.vscode = SimpleNamespace(
+        open_vscode=success,
+        open_file=success,
+        search_in_files=success,
+        run_terminal_command=success,
+        format_document=success,
+    )
+    server.spotify_playing = None
+    arguments = {
+        "spotify_play": {"query": "test track"},
+        "spotify_pause": {},
+        "spotify_resume": {},
+        "spotify_next": {},
+        "spotify_previous": {},
+        "open_app": {"app": "notepad"},
+        "close_app": {"app": "notepad"},
+        "set_volume": {"level": 10},
+        "type_text": {"text": "mocked"},
+        "take_screenshot": {},
+        "lock_screen": {},
+        "open_downloads": {},
+        "open_documents": {},
+        "whatsapp_send": {"contact": "Test", "message": "mocked"},
+        "whatsapp_voice_call": {},
+        "vscode_open": {"folder": "C:/mock"},
+        "vscode_open_file": {"file": "mock.py"},
+        "vscode_search": {"term": "mock"},
+        "vscode_run_command": {"command": "echo mocked"},
+        "vscode_format": {},
+    }
+    tools = {tool.name: tool for tool in server.mcp._tool_manager.list_tools()}
+    assert tools.keys() == arguments.keys()
+
+    for name, tool in tools.items():
+        result = await tool.run(arguments[name])
+        assert not inspect.isawaitable(result), name
+        assert isinstance(result, dict), name
+        json.dumps(result)
 
 
 def test_action_submitted_after_panic_runs_normally():

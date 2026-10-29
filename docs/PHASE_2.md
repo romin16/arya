@@ -4,11 +4,11 @@ Status: implementation and mocked unit verification complete. The server runs in
 
 The desktop, WhatsApp, and VS Code legacy agent files were copied byte-for-byte to `device/legacy_agents/`. All registered tools use `SerialDesktopQueue`, a single worker that preserves GUI action order. `/panic` invalidates the current action result and drops work already waiting in the queue. A blocking legacy OS/GUI call already in progress cannot be safely terminated; the worker finishes it before another action starts. `pyautogui.FAILSAFE` remains enabled. Spotify's `playing` value is best-effort and starts unknown.
 
-`whatsapp_read` uses the legacy OCR path and requires the Tesseract executable installed on Windows, in addition to the Python `pytesseract` package.
+The WhatsApp device surface supports sending messages and voice calls. Message reading/OCR is intentionally not exposed.
 
 ## Verification
 
-- `python -m pytest tests/unit -q`: **11 passed** (the device tests mock `pyautogui` and `win32gui`).
+- `uv run --extra device --group dev python -m pytest tests/unit -q`: **12 passed** (the device tests mock `pyautogui` and `win32gui`).
 - `python -m py_compile device/server.py device/queue.py scripts/device_smoke.py tests/unit/test_device.py`: passed.
 - `python scripts/device_smoke.py --help`: passed. The smoke client was not run against the server and no desktop action was invoked.
 
