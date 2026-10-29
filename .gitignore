@@ -13,3 +13,6 @@ __pycache__/
 *.mp3
 temp_*
 "@ | Set-Content .gitignore -Encoding utf8
+*.egg-info/
+
+.uv-cache/
