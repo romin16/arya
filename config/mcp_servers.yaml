@@ -1,0 +1,14 @@
+servers:
+  google_workspace:
+    enabled: false
+    transport: stdio
+    command: ""
+    args: []
+    env: {}
+  arya_device:
+    enabled: true
+    url: http://127.0.0.1:5002/mcp
+    token_env: DEVICE_TOKEN
+  browser:
+    enabled: true
+    url: http://127.0.0.1:8000

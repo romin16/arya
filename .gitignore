@@ -1,0 +1,15 @@
+@"
+.env
+.env.*
+!.env.example
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.log
+*.wav
+*.mp3
+temp_*
+"@ | Set-Content .gitignore -Encoding utf8

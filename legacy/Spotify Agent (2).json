@@ -1,0 +1,208 @@
+{
+  "name": "Spotify Agent",
+  "nodes": [
+    {
+      "parameters": {
+        "inputSource": "passthrough"
+      },
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        -16,
+        1632
+      ],
+      "id": "c3f109a3-baf5-4df6-8e35-b75c3de3ca0c",
+      "name": "When Executed by Another Workflow"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ═══════════════════════════════════════════════════════════════\n// SPOTIFY PARSER V5 - Handles direct action strings + natural language\n// ═══════════════════════════════════════════════════════════════\n\nconst input = $input.first().json;\nconst rawQuery = (input.query || '').trim();\nconst request = rawQuery.toLowerCase();\n\nlet action = 'search';\nlet query = rawQuery;\n\nconsole.log('[Spotify] Raw input:', rawQuery);\nconsole.log('[Spotify] Lowercase:', request);\n\n// ═══════════════════════════════════════════════════════════════\n// Step 1: Handle direct action strings (sent by ARYA agent)\n// ═══════════════════════════════════════════════════════════════\nif (request === 'play_pause' || request === 'pause' || request === 'resume' ||\n    request === 'unpause' || request === 'continue' || request === 'stop') {\n  action = 'play_pause';\n  query = '';\n  console.log('[Spotify] → Direct play_pause command');\n  return { json: { action, query } };\n}\n\nif (request === 'next' || request === 'next_track' || request === 'skip') {\n  action = 'next';\n  query = '';\n  console.log('[Spotify] → Direct next command');\n  return { json: { action, query } };\n}\n\nif (request === 'previous' || request === 'previous_track' || request === 'prev' || request === 'back') {\n  action = 'previous';\n  query = '';\n  console.log('[Spotify] → Direct previous command');\n  return { json: { action, query } };\n}\n\n// ═══════════════════════════════════════════════════════════════\n// Step 2: Handle natural language phrases\n// ═══════════════════════════════════════════════════════════════\nif (request.match(/\b(pause|unpause|resume|stop|continue)\b/) &&\n    !request.match(/\b(play|search|find|put on)\b/)) {\n  action = 'play_pause';\n  query = '';\n  console.log('[Spotify] → Natural language play_pause');\n  return { json: { action, query } };\n}\n\nif (request.match(/\b(next|skip)\b/) &&\n    !request.match(/\b(play|search|find)\b/)) {\n  action = 'next';\n  query = '';\n  console.log('[Spotify] → Natural language next');\n  return { json: { action, query } };\n}\n\nif (request.match(/\b(previous|back|go back|last song)\b/) &&\n    !request.match(/\b(play|search|find)\b/)) {\n  action = 'previous';\n  query = '';\n  console.log('[Spotify] → Natural language previous');\n  return { json: { action, query } };\n}\n\n// ═══════════════════════════════════════════════════════════════\n// Step 3: Everything else is a search\n// ═══════════════════════════════════════════════════════════════\naction = 'search';\nquery = rawQuery\n  .replace(/\b(play|search|for|on|in|spotify|the|a)\b/gi, '')\n  .replace(/\\s+/g, ' ')\n  .trim();\n\nif (!query) {\n  query = rawQuery;\n}\n\nconsole.log('[Spotify] → Search:', query);\n\nconst result = { action, query };\nconsole.log('[Spotify] FINAL:', JSON.stringify(result));\nreturn { json: result };\n"
+      },
+      "id": "9e98bed2-65ab-480e-a3fa-0bdc9d5361c2",
+      "name": "Parse Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        208,
+        1632
+      ]
+    },
+    {
+      "parameters": {
+        "dataType": "string",
+        "value1": "={{ $json.action }}",
+        "rules": {
+          "rules": [
+            {
+              "value2": "play_pause"
+            },
+            {
+              "value2": "next",
+              "output": 1
+            },
+            {
+              "value2": "previous",
+              "output": 2
+            },
+            {
+              "value2": "search",
+              "output": 3
+            }
+          ]
+        },
+        "fallbackOutput": 0
+      },
+      "id": "84612c27-6b5f-463a-95b9-c1eb01644693",
+      "name": "Route Action",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 1,
+      "position": [
+        448,
+        1632
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:5000/desktop/spotify/play_pause",
+        "options": {}
+      },
+      "id": "db7ebcb1-75b2-413f-8f9f-b02973c2fc7c",
+      "name": "Play/Pause",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        720,
+        1344
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:5000/desktop/spotify/next",
+        "options": {}
+      },
+      "id": "d2ee19de-e23e-4280-a4c9-c97948360c08",
+      "name": "Next",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        720,
+        1504
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:5000/desktop/spotify/previous",
+        "options": {}
+      },
+      "id": "eef6435b-4eef-463b-8cb0-6bbb298f67a8",
+      "name": "Previous",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        720,
+        1664
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:5000/desktop/spotify/search",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ query: $json.query }) }}",
+        "options": {}
+      },
+      "id": "8691e6f7-4549-47e3-a915-f5f0b0b6be43",
+      "name": "Search",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        736,
+        1824
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 2000
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "When Executed by Another Workflow": {
+      "main": [
+        [
+          {
+            "node": "Parse Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Request": {
+      "main": [
+        [
+          {
+            "node": "Route Action",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route Action": {
+      "main": [
+        [
+          {
+            "node": "Play/Pause",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Next",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Previous",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Search",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "availableInMCP": false
+  },
+  "versionId": "a06ac284-81f6-4a1e-b1d4-2097346ebb42",
+  "meta": {
+    "instanceId": "92837384f8d184a48e0e9dc5b47da7373a29dfbb663666fd5bf5f39dfada8514"
+  },
+  "id": "1ccJgygCNT3qGL6o",
+  "tags": []
+}

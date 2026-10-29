@@ -1,0 +1,261 @@
+{
+  "name": "Desktop Agent - Apps & System",
+  "nodes": [
+    {
+      "parameters": {
+        "inputSource": "passthrough"
+      },
+      "id": "ecda6fc0-173e-4818-bece-a46082eade70",
+      "name": "When Executed by Another Workflow",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        3216,
+        3664
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const input = $input.first().json;\nconst userRequest = String(input.query || input.user_request || input.message || JSON.stringify(input));\nconst request = userRequest.toLowerCase();\n\nlet action, app_name, level, text;\n\nif (request.includes('volume') || request.includes('sound')) {\n  action = 'system_volume';\n  const match = request.match(/(\\d+)/);\n  level = match ? parseInt(match[1]) : 50;\n}\nelse if (request.includes('type ') || request.match(/^type /)) {\n  action = 'type_text';\n  text = userRequest.replace(/^type\\s+/i, '').trim();\n}\nelse if (request.includes('close') || request.includes('quit') || request.includes('exit')) {\n  action = 'close_app';\n  const apps = ['chrome','spotify','vscode','vs code','visual studio','calculator','notepad','discord','whatsapp','explorer','firefox','edge'];\n  for (const app of apps) {\n    if (request.includes(app)) {\n      app_name = (app === 'vs code' || app === 'visual studio') ? 'vscode' : app;\n      break;\n    }\n  }\n}\nelse if (request.includes('open') || request.includes('launch') || request.includes('start')) {\n  action = 'open_app';\n  const apps = ['chrome','spotify','vscode','vs code','visual studio','calculator','notepad','discord','whatsapp','explorer','firefox','edge'];\n  for (const app of apps) {\n    if (request.includes(app)) {\n      app_name = (app === 'vs code' || app === 'visual studio') ? 'vscode' : app;\n      break;\n    }\n  }\n}\nelse {\n  action = 'unknown';\n}\n\nconsole.log('[Desktop] Action:', action, '| App:', app_name, '| Level:', level);\nreturn { action, app_name, level, text, original_request: userRequest };"
+      },
+      "id": "c6c1b547-bce9-4b6a-a46a-876cb2dd0bb6",
+      "name": "Parse Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3456,
+        3664
+      ]
+    },
+    {
+      "parameters": {
+        "dataType": "string",
+        "value1": "={{ $json.action }}",
+        "rules": {
+          "rules": [
+            {
+              "value2": "open_app"
+            },
+            {
+              "value2": "close_app",
+              "output": 1
+            },
+            {
+              "value2": "system_volume",
+              "output": 2
+            },
+            {
+              "value2": "type_text",
+              "output": 3
+            }
+          ]
+        },
+        "fallbackOutput": 4
+      },
+      "id": "8131fb87-5aec-45ba-b430-b34af7e63ef5",
+      "name": "Route Action",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 1,
+      "position": [
+        3696,
+        3664
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:5000/desktop/open_app",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ app_name: $json.app_name }) }}",
+        "options": {}
+      },
+      "id": "6cb75719-9413-46ce-861b-8331bcda98e1",
+      "name": "Open App",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3936,
+        3424
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:5000/desktop/close_app",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ app_name: $json.app_name }) }}",
+        "options": {}
+      },
+      "id": "74c07494-e5cd-4ba8-afce-258c9b3b422f",
+      "name": "Close App",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3936,
+        3584
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:5000/desktop/system/volume",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ level: $json.level }) }}",
+        "options": {}
+      },
+      "id": "cb3e21fd-7ee3-4694-a4e0-a21ae936df42",
+      "name": "Volume",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3936,
+        3744
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:5000/desktop/type_text",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ text: $json.text }) }}",
+        "options": {}
+      },
+      "id": "3b9d66cb-c031-4373-ac32-4d90fa760500",
+      "name": "Type",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3936,
+        3904
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.first();\nif (!item) return [{ json: { success: false, message: 'No response from desktop agent' } }];\nreturn [{ json: item.json }];"
+      },
+      "id": "6abf1f2d-5935-4a2d-8ff8-a48b5b46990a",
+      "name": "Return Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4176,
+        3664
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "When Executed by Another Workflow": {
+      "main": [
+        [
+          {
+            "node": "Parse Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Request": {
+      "main": [
+        [
+          {
+            "node": "Route Action",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route Action": {
+      "main": [
+        [
+          {
+            "node": "Open App",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Close App",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Volume",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Type",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Open App": {
+      "main": [
+        [
+          {
+            "node": "Return Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Close App": {
+      "main": [
+        [
+          {
+            "node": "Return Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Volume": {
+      "main": [
+        [
+          {
+            "node": "Return Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Type": {
+      "main": [
+        [
+          {
+            "node": "Return Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "fef7ea5d-7399-4ca4-88c8-bdc9a08e989f",
+  "meta": {
+    "instanceId": "92837384f8d184a48e0e9dc5b47da7373a29dfbb663666fd5bf5f39dfada8514"
+  },
+  "id": "8skLp8jW7wSNjnzQ",
+  "tags": []
+}

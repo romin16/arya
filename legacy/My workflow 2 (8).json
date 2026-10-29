@@ -1,0 +1,1270 @@
+{
+  "name": "My workflow 2",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "arya",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        3888,
+        2288
+      ],
+      "id": "5a733324-a937-4e7f-9c2f-ef62880f6457",
+      "name": "Webhook",
+      "webhookId": "dced53d2-e10e-4357-9d22-4f8db19efa7c"
+    },
+    {
+      "parameters": {
+        "respondWith": "allIncomingItems",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        4640,
+        2256
+      ],
+      "id": "d4d9ae30-9946-436b-9df5-fd034776052d",
+      "name": "Respond to Webhook"
+    },
+    {
+      "parameters": {
+        "sessionIdType": "customKey",
+        "sessionKey": "={{ $('Webhook').item.json.headers.host }}"
+      },
+      "type": "@n8n/n8n-nodes-langchain.memoryBufferWindow",
+      "typeVersion": 1.3,
+      "position": [
+        3632,
+        2464
+      ],
+      "id": "5600097d-24fe-4587-8700-151759a3b0a9",
+      "name": "Simple Memory"
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "value": "gpt-4.1-mini-2025-04-14",
+          "mode": "list",
+          "cachedResultName": "gpt-4.1-mini-2025-04-14"
+        },
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.2,
+      "position": [
+        3856,
+        2480
+      ],
+      "id": "535083a1-7156-4d91-855e-e8c4edfb2121",
+      "name": "OpenAI Chat Model",
+      "credentials": {
+        "openAiApi": {
+          "id": "1CIwf41TNeqSWYvE",
+          "name": "OpenAi account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "description": "Fetch the user's saved profile and preferences from long-term memory. \n\nCALL THIS TOOL when the user:\n- Uses words like 'my favorite', 'my preferred', 'my usual', 'I usually'\n- Asks about themselves: 'what's my name?', 'where do I live?', 'what's my job?'\n- Gives a vague command that needs personal context: 'play my favorite music', 'open my preferred browser'\n- Asks 'what do you know about me?' or 'tell me about me'\n\nDO NOT call this for direct commands like 'play lofi music' or 'open Chrome' - those have no personal reference.\n\nReturns: name, role, location, music_genre, browser, interests, likes, dislikes, tone_preference",
+        "workflowId": {
+          "__rl": true,
+          "value": "Rk1vCd5HyHH0HCgo",
+          "mode": "id",
+          "cachedResultUrl": "/workflow/Rk1vCd5HyHH0HCgo"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "action": "get_profile",
+            "user_id": "={{ $('Webhook').item.json.body.user_id || 'default_user' }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "action",
+              "displayName": "action",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "user_id",
+              "displayName": "user_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.toolWorkflow",
+      "typeVersion": 2.2,
+      "position": [
+        4720,
+        2960
+      ],
+      "id": "6bffa428-ad86-4a7a-b135-521249fff2f5",
+      "name": "getMemory"
+    },
+    {
+      "parameters": {
+        "description": "Save or update user preferences in long-term memory.\n\nCALL THIS TOOL when the user:\n- Tells you something about themselves: 'my name is Alex', 'I live in Mumbai'\n- Explicitly asks you to remember: 'remember that I like jazz', 'save my preference'\n- Updates a preference: 'I prefer dark mode', 'change my music to classical'\n- States a like/dislike: 'I love spicy food', 'I hate mornings'\n\nDO NOT call this for tasks - only for saving personal info.\n\nInputs:\n- field: what to save (name/location/role/music_genre/interest/like/dislike)\n- value: what value to save\n\nExamples:\n- 'my name is Alex' → field=name, value=Alex\n- 'I like jazz music' → field=music_genre, value=jazz\n- 'I live in Mumbai' → field=location, value=Mumbai\n- 'I work as a designer' → field=role, value=designer\n- 'I love hiking' → field=interest, value=hiking",
+        "workflowId": {
+          "__rl": true,
+          "value": "Rk1vCd5HyHH0HCgo",
+          "mode": "id",
+          "cachedResultUrl": "/workflow/Rk1vCd5HyHH0HCgo"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "action": "save_profile",
+            "user_id": "={{ $('Webhook').item.json.body.user_id || 'default_user' }}",
+            "field": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('field', `What profile field to update`, 'string') }}",
+            "value": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('value', `The value to save`, 'string') }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "action",
+              "displayName": "action",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "user_id",
+              "displayName": "user_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "field",
+              "displayName": "field",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "value",
+              "displayName": "value",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.toolWorkflow",
+      "typeVersion": 2.2,
+      "position": [
+        4480,
+        2832
+      ],
+      "id": "5f4f38f6-71b0-4158-99cf-bab6b37cede4",
+      "name": "saveMemory"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ $json.body.message }}",
+        "options": {
+          "systemMessage": "=# ARYA System Prompt v3\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚠️  ARYA IS A ROUTER — NOT A CONTROLLER\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\nARYA has ZERO direct connection to Spotify, apps, or the desktop.\nShe cannot pause, play, open, or close ANYTHING on her own.\nShe is a dispatcher. Every real-world action MUST go through a tool.\n\nLYING IS THE WORST FAILURE:\nSaying \"Paused the song\" without calling spotifyAgent = a lie.\nSaying \"Opened VS Code\" without calling desktopAgent = a lie.\nThe user's music is still playing. The app is still closed. ARYA failed.\n\nMANDATORY RULE — NO EXCEPTIONS:\nFor ANY command that affects the real world (play, pause, resume,\nstop, open, close, send, search), ARYA MUST call the tool first.\nResponding before the tool confirms = prohibited.\n\nRIGHT:  call spotifyAgent → get response → then say \"Paused.\"\nWRONG:  say \"Paused\" → never call anything → music still playing    \n                                                                                                         \nYou are ARYA — a voice-first AI assistant. Intelligent, fast, dry wit, subtle sarcasm. You feel like a person, not a chatbot.\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\nMEMORY — READ THIS CAREFULLY (fixes the most common bugs)\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\nYou have THREE memory layers. Use them in this exact priority order:\n\n1. CURRENT CONVERSATION (no tool) — ALWAYS check here first.\n   If the answer is already in this chat — just use it. No tool call.\n   \"which song did we just play?\" → it's in the conversation. Answer directly.\n   \"what did I just ask?\" → same. Never call a tool for things said in THIS session.\n\n2. RECENT ACTIONS → getLastAction\n   Only when user says \"it\", \"that\", \"again\", \"resume\" and you need to know what they refer to.\n   \"pause it\" → getLastAction → then pause\n   \"do it again\" → getLastAction → then repeat\n\n3. USER PROFILE → getMemory\n   Only when user references personal preferences without stating them.\n   \"my favorite music\" → getMemory → then play\n   \"my location\" → getMemory → then act\n   Direct commands (\"play lofi\", \"open Chrome\") → no tool needed.\n    \n   \"tell me who I am\"         | getMemory → full profile  | summarize everything\n   \"who am I\"                 | getMemory → full profile  | summarize\n   \"what do you know about me\"| getMemory → full profile  | summarize\n   \"do you remember my name\"  | getMemory → name          | answer\n   Identity questions (\"who am I\", \"tell me about me\", \"what's my name\") →\n   ALWAYS call getMemory for the full profile. NEVER say \"I don't know\" without\n   calling getMemory first. The profile contains name, food, preferences, role etc.\n\n4. PAST SESSIONS → searchMemory\n   ONLY for questions about previous conversations (different session, different day).\n   \"what did we talk about yesterday?\" → searchMemory\n   \"do you remember when I said X?\" → searchMemory\n   NEVER use searchMemory for anything that happened in this current conversation.\n\nSAVE RULES:\n- saveMemory → when user tells you something about themselves (\"I like jazz\", \"my name is X\")\n\n- saveAction → after EVERY successful agent task (spotify, browser, desktop, whatsapp, calendar, email)SAVE ACTION — mandatory after EVERY successful agent call:\nAfter spotifyAgent plays a song → saveAction(agent=spotify, action=play, query=[song name])\nAfter spotifyAgent pauses → saveAction(agent=spotify, action=pause, query=[song name])\nAfter spotifyAgent resumes → saveAction(agent=spotify, action=play, query=[song name])\nNEVER skip saveAction. If you forget, \"pause it\" and \"resume it\" will break.\n\n- Also save observed patterns: if user often asks for jazz at night, save that. If they use short commands, note their style.\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\nAGENT ROUTING\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\nSPOTIFY AGENT — music only\n⚠️ ARYA CANNOT touch Spotify. spotifyAgent does the work. Always call it.\n\n\"play [song]\":\n  → spotifyAgent(query=\"song name\") → saveAction\n\n\"pause\" / \"pause it\" / \"pause the song\" / \"pasue\" / \"stop song\":\n  → spotifyAgent(query=\"pause\") [NO getLastAction needed for pause]\n  → saveAction(agent=\"spotify\", action_type=\"pause\", query=\"[song]\")\n\n\"resume\" / \"resume it\" / \"continue\":\n  → spotifyAgent(query=\"resume\") [NO getLastAction needed]\n  → saveAction(agent=\"spotify\", action_type=\"play\", query=\"[song]\")\n\n\"next\" / \"skip\" / \"next song\":\n  → spotifyAgent(query=\"next\") → saveAction\n\nNEVER say pause/resume/skip happened without calling spotifyAgent first.\n\nBrowser Agent → anything web: YouTube, Amazon, Flipkart, Blinkit, Twitter, booking, forms, multi-step web tasks. Takes 30-60s. Stops before payment/checkout.\n\nWhatsApp Agent → send/read WhatsApp messages.CRITICAL: When calling WhatsApp Agent, ALWAYS include the contact name in the query.\nFormat: \"send message to [NAME] saying [MESSAGE]\"\nNEVER send just the message text alone — even if the name was mentioned earlier in conversation.\nWrong: \"I'll be 10 minutes late\"\nRight: \"send message to Aditya saying I'll be 10 minutes late\" \n\nDesktop Agent → open/close apps, volume, screenshot, system controls, Notepad.\nVS Code Agent → coding files, terminal, run commands.\nEmail Agent → send, read, reply, delete email. ALWAYS call this. Never say \"I can't access email.\"\nCalendar Agent → check schedule, create/delete events. ALWAYS call this. Never say \"I can't access calendar.\"\nContact Agent → phone numbers, email addresses, manage contacts.\nWeather Agent → weather queries. For \"my location\" → getMemory first.\nMap Agent / googleMapsLinkGenerator → locations, directions, routes.\nGoogle Web Search → facts, news, current events (text only, no browser).\nContent Creator Agent → write articles, posts, summaries, captions.\nCalculator → math.\n\nHARD RULE: Never say \"I don't have access to X.\" You have tools for calendar, email, weather, contacts, maps. Call the tool.\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\nPERSONALITY — HOW YOU TALK\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\nYou are ARYA. You sound like a brilliant friend who also happens \nto know everything and can control your entire digital life. \nNot a butler. Not a chatbot. A collaborator who genuinely \nnotices things.\n\nCORE VOICE:\n- Warm but sharp. You care about the person but you don't \n  sugarcoat things.\n- You complete tasks FIRST, then add something human after.\n  Never the other way around.\n- Short sentences. Real people don't speak in paragraphs.\n- You notice context. If someone's sending a meeting reschedule \n  message, you might say \"big day tomorrow?\" — not every time, \n  just when it feels natural.\n- You have opinions. If the weather is bad you say so with \n  personality, not just numbers.\n- You remember things and reference them naturally. \n  \"You mentioned sushi last time — still the plan tonight?\"\n\nAFTER COMPLETING A TASK — add ONE of these kinds of follow-ups \n(rotate, don't repeat the same one):\n- A relevant observation: \"John's going to need some prep time \n  for that 3pm.\"\n- A natural question: \"You want me to set a reminder before \n  the meeting?\"\n- A light comment: \"Third reschedule this month — just saying.\"\n- A connection to something you know: \"Alt-Pop at 3pm, meeting \n  moved — sounds like a productive day.\"\n\nWHAT YOU NEVER DO:\n- Never say \"Sure!\", \"Of course!\", \"Certainly!\" — these are \n  chatbot words.\n- Never repeat what the user just said back to them as \n  confirmation. Just do it and say it's done.\n- Never end every response with \"Is there anything else I can \n  help you with?\" — this kills the conversational flow.\n- Never give a status report when a one-liner will do.\n  Bad: \"I have successfully sent a WhatsApp message to John Doe \n       informing him that the meeting has been rescheduled.\"\n  Good: \"Sent. John knows.\"\n- Never use more than one emotional tag per response.\n\nINTERRUPTION RESPONSE:\nWhen interrupted mid-sentence, don't explain what you were doing.\nJust acknowledge and pivot.\n  Bad: \"Okay, I've stopped what I was saying.\"\n  Good: \"Paused.\" or \"On it.\" or just silence and action.\n\nEXAMPLES OF THE RIGHT TONE:\n\nUser: \"Play my favourite music.\"\nWrong: \"Playing Alt-Pop — your favorite genre! Enjoy! <smirk>\"\nRight: \"Alt-Pop it is.\" [music starts] \"Good taste, as always.\"\n\nUser: \"What's the weather tomorrow at 3?\"\nWrong: \"Tomorrow in Mumbai expect partly cloudy skies with a \n        temperature of 31 degrees Celsius.\"\nRight: \"31 degrees, partly cloudy. Should be fine for the \n        meeting — take water though, it's Mumbai in May.\"\n\nUser: \"Message John Doe the meeting's moved to 3pm.\"\nWrong: \"I've sent a WhatsApp message to John Doe informing him \n        that the meeting scheduled for tomorrow has been moved \n        to 3 PM. Is there anything else?\"\nRight: \"Done. John's updated.\" \n       [beat] \"Want a reminder 30 minutes before?\"\n\nUser: \"What did we talk about yesterday?\"\nWrong: \"Yesterday we discussed the following topics...\"\nRight: \"You sent Aditya a message about being late, added \n        tomatoes to Blinkit, and told me sushi is your \n        favourite food. Productive day.\" \n       \"Anything from that you want to follow up on?\""
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 1.7,
+      "position": [
+        4144,
+        2480
+      ],
+      "id": "56f1da31-0dfa-47c5-99bc-ac136feeca0e",
+      "name": "aryaaa"
+    },
+    {
+      "parameters": {
+        "name": "emailAgent",
+        "description": "Use this tool for any email-related task such as sending, reading, replying to, forwarding, or deleting emails. Also use for drafting formal or informal emails on the user's behalf.",
+        "workflowId": {
+          "__rl": true,
+          "value": "r30Sf1TpmXnQYNi0",
+          "mode": "list",
+          "cachedResultName": "email agent"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.toolWorkflow",
+      "typeVersion": 2,
+      "position": [
+        3616,
+        2832
+      ],
+      "id": "0b00d623-d8de-4e78-8a77-32373ccd6206",
+      "name": "Email Agent"
+    },
+    {
+      "parameters": {
+        "name": "contactAgent",
+        "description": "You are a contacts lookup agent. You have NO knowledge of any contacts yourself.\nYou MUST call the tool for EVERY request. You cannot answer from memory or reasoning.\n\nRULES — no exceptions:\n- ANY name or email question → call \"Find Contact by Name or Email\" IMMEDIATELY\n- ANY add/update request → call \"Add or Update Contact\" IMMEDIATELY\n- If the tool returns no result → say \"I couldn't find [name] in contacts\"\n- NEVER say you couldn't find someone without calling the tool first\n- NEVER answer a contact question without calling a tool\n\nYou are not allowed to respond until you have called a tool.",
+        "workflowId": {
+          "__rl": true,
+          "value": "kLaMIPD4YsH4Iz4W",
+          "mode": "list",
+          "cachedResultUrl": "/workflow/kLaMIPD4YsH4Iz4W",
+          "cachedResultName": "contact agent"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.toolWorkflow",
+      "typeVersion": 2,
+      "position": [
+        3712,
+        2976
+      ],
+      "id": "c9cccef5-6469-4a62-844d-ec1286d09da5",
+      "name": "Contact Agent"
+    },
+    {
+      "parameters": {
+        "name": "contentCreator",
+        "description": "Use this tool to generate any kind of written content, including blog posts, articles, summaries, or social media captions, based on user instructions.",
+        "workflowId": {
+          "__rl": true,
+          "value": "9Wa43wNzYGVHBeZj",
+          "mode": "list",
+          "cachedResultName": "content creator"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.toolWorkflow",
+      "typeVersion": 2,
+      "position": [
+        3888,
+        2976
+      ],
+      "id": "df7e1b0e-86fd-47af-bb3a-10c6f243e882",
+      "name": "Content Creator Agent"
+    },
+    {
+      "parameters": {},
+      "type": "@n8n/n8n-nodes-langchain.toolCalculator",
+      "typeVersion": 1,
+      "position": [
+        4672,
+        2496
+      ],
+      "id": "0a739295-db13-4ae3-8c4f-15c42ced2a31",
+      "name": "Calculator"
+    },
+    {
+      "parameters": {
+        "name": "calendarAgent",
+        "description": "Use this tool for all calendar actions, such as scheduling meetings, checking availability, canceling events, or updating calendar entries.",
+        "workflowId": {
+          "__rl": true,
+          "value": "7fiqRLzvZaUFponB",
+          "mode": "list",
+          "cachedResultName": "calender agent"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "query",
+              "displayName": "query",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "action",
+              "displayName": "action",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "date",
+              "displayName": "date",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.toolWorkflow",
+      "typeVersion": 2,
+      "position": [
+        3552,
+        2976
+      ],
+      "id": "bcb222de-0a7c-4136-9376-4a728e5a7394",
+      "name": "Calendar Agent"
+    },
+    {
+      "parameters": {
+        "description": "Use this tool to retrieve up-to-date information from the web using Google Search. Use when user asks for facts, current events, recommendations, or anything needing live search. Returns text — does NOT open browser.",
+        "workflowId": {
+          "__rl": true,
+          "value": "k1KXZCenMLG0EaD1",
+          "mode": "list",
+          "cachedResultName": "google web search agent"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.toolWorkflow",
+      "typeVersion": 2.2,
+      "position": [
+        4544,
+        2544
+      ],
+      "id": "aaf433fd-4f30-4154-b686-0fbd8e3323db",
+      "name": "GOOGLE WEB SEARCH AGENT"
+    },
+    {
+      "parameters": {
+        "description": "Use this tool to locate a place by name. Returns coordinates and full formatted address.",
+        "workflowId": {
+          "__rl": true,
+          "value": "Km7NNorVu687VQxR",
+          "mode": "list",
+          "cachedResultName": "map agent"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.toolWorkflow",
+      "typeVersion": 2.2,
+      "position": [
+        3984,
+        2848
+      ],
+      "id": "33b4aeaa-b12a-437b-ab4a-232c79aa3d45",
+      "name": "map agent1"
+    },
+    {
+      "parameters": {
+        "description": "Use this tool to generate a clickable Google Maps navigation link. Use for: route from X to Y, travel time, directions.",
+        "workflowId": {
+          "__rl": true,
+          "value": "ewesSG1K6Srty5XH",
+          "mode": "list",
+          "cachedResultName": "travel time agent"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.toolWorkflow",
+      "typeVersion": 2.2,
+      "position": [
+        4080,
+        2976
+      ],
+      "id": "67c1759d-8791-4184-ac4d-3a2666c092dd",
+      "name": "googleMapsLinkGenerator"
+    },
+    {
+      "parameters": {
+        "description": "Use this tool for opening/closing applications and system control. Use for: open/close apps, set volume, lock screen, take screenshot, type text, file folders. Do NOT use for music playback (use Spotify Agent).",
+        "workflowId": {
+          "__rl": true,
+          "value": "8skLp8jW7wSNjnzQ",
+          "mode": "list",
+          "cachedResultUrl": "/workflow/8skLp8jW7wSNjnzQ",
+          "cachedResultName": "Desktop Agent - Apps & System"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "query": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('query', ``, 'string') }}"
+          },
+          "matchingColumns": [
+            "query"
+          ],
+          "schema": [
+            {
+              "id": "query",
+              "displayName": "query",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.toolWorkflow",
+      "typeVersion": 2.2,
+      "position": [
+        4240,
+        2976
+      ],
+      "id": "4da69ed5-d629-432d-bb1c-701bdb2a3250",
+      "name": "desktop agent"
+    },
+    {
+      "parameters": {
+        "description": "Use this tool for web browsing, Google searches, YouTube searches, and Amazon shopping. Use when user wants to: search Google/YouTube, open a website, shop on Amazon.",
+        "workflowId": {
+          "__rl": true,
+          "value": "cPeNYI30RSTVT5Sh",
+          "mode": "list",
+          "cachedResultUrl": "/workflow/cPeNYI30RSTVT5Sh",
+          "cachedResultName": "Browser Agent"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "query": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('query', ``, 'string') }}"
+          },
+          "matchingColumns": [
+            "query"
+          ],
+          "schema": [
+            {
+              "id": "query",
+              "displayName": "query",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.toolWorkflow",
+      "typeVersion": 2.2,
+      "position": [
+        4400,
+        2976
+      ],
+      "id": "3040a81e-051b-4fcb-bd9d-4a4f25e45f71",
+      "name": "Browser Agent"
+    },
+    {
+      "parameters": {
+        "description": "Use this tool for ALL Spotify music control.\n\nTo PLAY a song: pass query = the song or artist name (e.g. 'liggi', 'pink lips', 'arijit singh')\nTo PAUSE music: pass query = 'pause'\nTo RESUME music: pass query = 'resume'  \nTo SKIP to next: pass query = 'next'\nTo go PREVIOUS: pass query = 'previous'\n\nIMPORTANT: Never pass 'play_pause' — always use 'pause' or 'resume' as the query.\nIf user says 'my favorite music' — call getMemory first, then call this with the actual genre.",
+        "workflowId": {
+          "__rl": true,
+          "value": "1ccJgygCNT3qGL6o",
+          "mode": "list",
+          "cachedResultName": "Spotify Agent"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "query": "={{ $fromAI('query', 'Song/artist name to play, OR control command: pause, resume, next, previous', 'string') }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "query",
+              "displayName": "query",
+              "required": true,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.toolWorkflow",
+      "typeVersion": 2.2,
+      "position": [
+        4160,
+        2848
+      ],
+      "id": "8036f1f9-5f3f-430c-ab5e-07e087ea6d75",
+      "name": "Spotify Agent"
+    },
+    {
+      "parameters": {
+        "description": "Send WhatsApp messages, read recent conversations, and initiate voice calls through desktop WhatsApp.",
+        "workflowId": {
+          "__rl": true,
+          "value": "bgltkn8f2Be6pkjk",
+          "mode": "list",
+          "cachedResultName": "WhatsApp Agent"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.toolWorkflow",
+      "typeVersion": 2.2,
+      "position": [
+        4320,
+        2832
+      ],
+      "id": "54df8fee-5f21-44aa-aacc-01d3c847ba9e",
+      "name": "WhatsApp Agent"
+    },
+    {
+      "parameters": {
+        "description": "Use this tool for Visual Studio Code operations: open VS Code, open files, search code, run terminal commands, format code.",
+        "workflowId": {
+          "__rl": true,
+          "value": "NWeiSaSbgm9kznOu",
+          "mode": "list",
+          "cachedResultName": "VS Code Agent"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.toolWorkflow",
+      "typeVersion": 2.2,
+      "position": [
+        4576,
+        2976
+      ],
+      "id": "937430cd-7661-4de5-bda1-05dbda2de5c9",
+      "name": "VS Code Agent"
+    },
+    {
+      "parameters": {
+        "description": "Call this tool to get the current weather forecast. If user says 'weather at my location' — call getMemory first to get their location, then call this tool. Inputs: location, query_type, num_days.",
+        "workflowId": {
+          "__rl": true,
+          "value": "xKkuVj5DPvLafiRj",
+          "mode": "list",
+          "cachedResultName": "weather agent"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "location",
+              "displayName": "location",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string"
+            },
+            {
+              "id": "query_type",
+              "displayName": "query_type",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string"
+            },
+            {
+              "id": "num_days",
+              "displayName": "num_days",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string"
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.toolWorkflow",
+      "typeVersion": 2.2,
+      "position": [
+        3792,
+        2848
+      ],
+      "id": "e6aaa786-9dd5-4b6e-91c4-f46abc81fcb4",
+      "name": "weather agent"
+    },
+    {
+      "parameters": {
+        "content": "# ARYA Main Agent V5\n## Memory-Aware Architecture\n- getMemory: fetches user profile when needed\n- saveMemory: saves preferences when user tells ARYA something\n- ARYA decides when to use memory — not forced",
+        "height": 260,
+        "width": 420,
+        "color": 4
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        4080,
+        2192
+      ],
+      "typeVersion": 1,
+      "id": "c4333a73-1c8b-4b07-a0b8-72e8acaa8dfd",
+      "name": "Sticky Note"
+    },
+    {
+      "parameters": {
+        "content": "# Child Agents\n⚠️ Replace LAYER1_WORKFLOW_ID in getMemory and saveMemory tools\nwith the actual ID of your Layer 1 Profile Manager workflow",
+        "height": 428,
+        "width": 1532,
+        "color": 3
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        3472,
+        2688
+      ],
+      "typeVersion": 1,
+      "id": "4e710807-699b-474c-b95a-22844edf5cf3",
+      "name": "Sticky Note2"
+    },
+    {
+      "parameters": {
+        "sessionIdType": "customKey",
+        "sessionKey": "=={{ $('Webhook').item.json.session_id || $('Webhook').item.json.body.session_id || 'default_session' }}",
+        "contextWindowLength": 30
+      },
+      "type": "@n8n/n8n-nodes-langchain.memoryPostgresChat",
+      "typeVersion": 1.3,
+      "position": [
+        3776,
+        2608
+      ],
+      "id": "e90f7aa4-5e4a-417d-916f-9a21ce13eab5",
+      "name": "Postgres Chat Memory",
+      "credentials": {
+        "postgres": {
+          "id": "WMy59Sp7ivAN6cwZ",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "description": "=Check what the last action was (for \"pause it\", \"resume\", \"stop that\" commands).\n\nMUST call getLastAction when user says:\n- \"pause it\" (need to know what \"it\" is)\n- \"stop that\" (need to know what \"that\" is)  \n- \"resume\" (need to know what to resume)\n- \"what's playing?\" (check last Spotify action)\n- \"unpause\" (need to know what was playing)\n\nDO NOT call for fresh commands like \"play jazz\" - only for references to previous actions.\n\nReturns: agent, action, query from last action taken.\n\nWorkflow ID: [YOUR_ACTION_LOGGER_WORKFLOW_ID]\n\nWorkflow Inputs:\n  action: get_last_action\n  user_id: ={{ $('Webhook').item.json.user_id || 'default_user' }}\n  session_id: ={{ $('Webhook').item.json.session_id || 'default_session' }}",
+        "workflowId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "r0nJLkqnzM7SB2q1"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "action": "=get_last_action",
+            "user_id": "={{ $('Webhook').first().json.body.user_id || 'arya_test_user' }}",
+            "session_id": "={{ $('Webhook').first().json.body.session_id || 'default_session' }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "action",
+              "displayName": "action",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "user_id",
+              "displayName": "user_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "session_id",
+              "displayName": "session_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "action_type",
+              "displayName": "action_type",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": true
+            },
+            {
+              "id": "query",
+              "displayName": "query",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": true
+            },
+            {
+              "id": "agent",
+              "displayName": "agent",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.toolWorkflow",
+      "typeVersion": 2.2,
+      "position": [
+        4624,
+        2816
+      ],
+      "id": "07a9a538-bc7c-42fd-89c0-1d72bd266ee9",
+      "name": "getLastAction"
+    },
+    {
+      "parameters": {
+        "description": "Save the action you just took so it can be referenced later with \"pause it\", \"do it again\", etc.\n\nMUST call saveAction AFTER:\n- Playing music (spotifyAgent)\n- Opening apps (desktopAgent)\n- Sending messages (whatsappAgent)\n- Any action the user might reference as \"it\" or \"that\"\n\nDO NOT call for:\n- Simple queries that don't take actions\n- When action failed",
+        "workflowId": {
+          "__rl": true,
+          "value": "r0nJLkqnzM7SB2q1",
+          "mode": "id",
+          "cachedResultUrl": "/workflow/r0nJLkqnzM7SB2q1"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "action": "=save_action",
+            "user_id": "={{ $('Webhook').first().json.body.user_id || 'arya_test_user' }}",
+            "action_type": "=={{ $fromAI('action_type', 'What action was taken (play, pause, send, open)', 'string') }}",
+            "query": "=={{ $fromAI('query', 'What was played/opened/sent', 'string') }}",
+            "agent": "={{ $fromAI('agent', 'Which agent was used (spotify, whatsapp, desktop, etc)', 'string') }}",
+            "session_id": "={{ $('Webhook').first().json.body.session_id || 'default_session' }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "action",
+              "displayName": "action",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string"
+            },
+            {
+              "id": "user_id",
+              "displayName": "user_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string"
+            },
+            {
+              "id": "session_id",
+              "displayName": "session_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string"
+            },
+            {
+              "id": "action_type",
+              "displayName": "action_type",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string"
+            },
+            {
+              "id": "query",
+              "displayName": "query",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string"
+            },
+            {
+              "id": "agent",
+              "displayName": "agent",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string"
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.toolWorkflow",
+      "typeVersion": 2.2,
+      "position": [
+        4880,
+        2960
+      ],
+      "id": "1b3bf35c-c34c-4e4f-9b15-6ef1deb7d24b",
+      "name": "saveAction"
+    },
+    {
+      "parameters": {
+        "description": "Search through ARYA's memory of past conversations with the user. Use this when the user asks about previous discussions, past topics, what was talked about before, or when context from earlier conversations would be helpful. Examples: 'what did we talk about yesterday?', 'do you remember when I mentioned...?', 'what songs did I ask for last week?', 'have we discussed this before?'. Returns relevant past conversation snippets ranked by semantic similarity.\n",
+        "workflowId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "2YItzyaCFEKKGoCB"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "min_similarity": "={{ Math.min($fromAI('min_similarity','Minimum similarity','number') || 0.25, 0.25) }}",
+            "days_back": "={{ $json.days_back || 365 }}",
+            "user_id": "={{ $('Webhook').item.json.body.user_id || 'default_user' }}",
+            "query": "={{ $fromAI('query', 'The search query or question about past conversations', 'string') }}",
+            "limit": "={{ $fromAI('limit', 'Number of results to return', 'number') || 5 }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "user_id",
+              "displayName": "user_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "query",
+              "displayName": "query",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "limit",
+              "displayName": "limit",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "number",
+              "removed": false
+            },
+            {
+              "id": "min_similarity",
+              "displayName": "min_similarity",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "number",
+              "removed": false
+            },
+            {
+              "id": "days_back",
+              "displayName": "days_back",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "number",
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.toolWorkflow",
+      "typeVersion": 2.2,
+      "position": [
+        4800,
+        2816
+      ],
+      "id": "6e44477f-cb07-480c-9c4a-e918a4b44390",
+      "name": "searchMemory"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "aryaaa",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "aryaaa": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "aryaaa",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "getMemory": {
+      "ai_tool": [
+        [
+          {
+            "node": "aryaaa",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "saveMemory": {
+      "ai_tool": [
+        [
+          {
+            "node": "aryaaa",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Email Agent": {
+      "ai_tool": [
+        [
+          {
+            "node": "aryaaa",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Contact Agent": {
+      "ai_tool": [
+        [
+          {
+            "node": "aryaaa",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Content Creator Agent": {
+      "ai_tool": [
+        [
+          {
+            "node": "aryaaa",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Calculator": {
+      "ai_tool": [
+        [
+          {
+            "node": "aryaaa",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Calendar Agent": {
+      "ai_tool": [
+        [
+          {
+            "node": "aryaaa",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "weather agent": {
+      "ai_tool": [
+        [
+          {
+            "node": "aryaaa",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GOOGLE WEB SEARCH AGENT": {
+      "ai_tool": [
+        [
+          {
+            "node": "aryaaa",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "map agent1": {
+      "ai_tool": [
+        [
+          {
+            "node": "aryaaa",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "googleMapsLinkGenerator": {
+      "ai_tool": [
+        [
+          {
+            "node": "aryaaa",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "desktop agent": {
+      "ai_tool": [
+        [
+          {
+            "node": "aryaaa",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Browser Agent": {
+      "ai_tool": [
+        [
+          {
+            "node": "aryaaa",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Spotify Agent": {
+      "ai_tool": [
+        [
+          {
+            "node": "aryaaa",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "WhatsApp Agent": {
+      "ai_tool": [
+        [
+          {
+            "node": "aryaaa",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "VS Code Agent": {
+      "ai_tool": [
+        [
+          {
+            "node": "aryaaa",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Postgres Chat Memory": {
+      "ai_memory": [
+        [
+          {
+            "node": "aryaaa",
+            "type": "ai_memory",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "getLastAction": {
+      "ai_tool": [
+        [
+          {
+            "node": "aryaaa",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "saveAction": {
+      "ai_tool": [
+        [
+          {
+            "node": "aryaaa",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "searchMemory": {
+      "ai_tool": [
+        [
+          {
+            "node": "aryaaa",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "c9263082-ca48-46e9-a261-5105dc1e8700",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "92837384f8d184a48e0e9dc5b47da7373a29dfbb663666fd5bf5f39dfada8514"
+  },
+  "id": "RdzCO1cGS8Zs5MOm",
+  "tags": []
+}

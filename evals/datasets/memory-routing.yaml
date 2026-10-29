@@ -1,0 +1,12 @@
+- utterance: What is my current salary?
+  operation: entity_read
+- utterance: What did we decide last April?
+  operation: episode_read
+- utterance: How does a SIP work?
+  operation: knowledge_read
+- utterance: I just changed jobs to TCS
+  operation: entity_update_and_episode_write
+- utterance: Never recommend equity to me again
+  operation: procedural_write
+- utterance: I'm worried about market volatility
+  operation: pattern_read

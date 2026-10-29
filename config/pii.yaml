@@ -1,0 +1,8 @@
+default_region: IN
+enabled:
+  email: true
+  phone: true
+  aadhaar: false
+  pan: false
+  card: false
+mask_tts: true

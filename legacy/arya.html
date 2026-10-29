@@ -1,0 +1,1776 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>ARYA</title>
+ 
+<!-- ═══════════════════════════════════════════════════════════════════
+  Porcupine Web SDK — offline wake word detection
+  Docs: https://picovoice.ai/docs/porcupine/web/
+  Files you must place in the SAME directory as this HTML:
+    1. hey-arya_en_web_v2_1_0.ppn   ← your custom wake word model
+    2. porcupine_params_en.pv        ← download from:
+       https://github.com/Picovoice/porcupine/raw/master/lib/web/
+       (pick the _en.pv file)
+═══════════════════════════════════════════════════════════════════ -->
+<script src="https://unpkg.com/@picovoice/porcupine-web/dist/iife/index.js"></script>
+<script src="https://unpkg.com/@picovoice/web-voice-processor/dist/iife/index.js"></script>
+ 
+<style>
+:root {
+  --bg: #05050a;
+  --surface: rgba(255,255,255,0.04);
+  --border: rgba(255,255,255,0.07);
+  --text: rgba(255,255,255,0.92);
+  --dim: rgba(255,255,255,0.42);
+  --accent: #00d4ff;
+  --green: #00ff88;
+  --purple: #a855f7;
+  --red: #ff4040;
+  --r: 12px;
+  --font: -apple-system, 'SF Pro Display', BlinkMacSystemFont, system-ui, sans-serif;
+  --mono: 'SF Mono', 'Fira Code', 'JetBrains Mono', monospace;
+}
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { height: 100%; overflow: hidden; background: var(--bg); }
+body { font-family: var(--font); color: var(--text); -webkit-font-smoothing: antialiased; }
+button { font-family: var(--font); cursor: pointer; border: none; background: none; color: inherit; }
+ 
+/* ── App shell ── */
+.app { position: relative; width: 100vw; height: 100vh; overflow: hidden; display: flex; flex-direction: column; }
+ 
+/* ── Orb canvas (full bleed background) ── */
+#orb { position: fixed; inset: 0; width: 100%; height: 100%; z-index: 0; pointer-events: none; }
+ 
+/* ── Sidebar ── */
+.sidebar {
+  position: fixed; left: 0; top: 0; bottom: 0; width: 288px;
+  background: rgba(6,6,12,0.97);
+  border-right: 1px solid var(--border);
+  backdrop-filter: blur(40px);
+  transform: translateX(-100%);
+  transition: transform 0.32s cubic-bezier(0.4,0,0.2,1);
+  z-index: 60; display: flex; flex-direction: column;
+}
+.sidebar.open { transform: translateX(0); }
+ 
+.sb-head {
+  padding: 22px 20px 18px;
+  border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; justify-content: space-between;
+}
+.sb-title { font-size: 0.68rem; font-weight: 600; letter-spacing: 0.14em; text-transform: uppercase; color: var(--dim); }
+.sb-close {
+  width: 28px; height: 28px; display: grid; place-items: center;
+  border-radius: 8px; background: var(--surface); border: 1px solid var(--border);
+  color: var(--dim); transition: all 0.18s;
+}
+.sb-close:hover { color: var(--text); background: rgba(255,255,255,0.08); }
+ 
+.sb-body { flex: 1; overflow-y: auto; padding: 14px; scrollbar-width: none; }
+.sb-body::-webkit-scrollbar { display: none; }
+ 
+.sb-empty { padding: 36px 16px; text-align: center; font-size: 0.79rem; color: var(--dim); line-height: 1.7; }
+ 
+.activity-item {
+  padding: 11px 13px; border-radius: 10px;
+  background: var(--surface); border: 1px solid var(--border);
+  margin-bottom: 9px; animation: fadeUp 0.22s ease;
+}
+.activity-label {
+  font-size: 0.67rem; font-weight: 600; letter-spacing: 0.08em;
+  text-transform: uppercase; color: var(--accent); margin-bottom: 4px;
+}
+.activity-detail { font-size: 0.79rem; color: var(--dim); line-height: 1.55; word-break: break-word; }
+ 
+/* ── Overlay ── */
+.overlay {
+  position: fixed; inset: 0; background: rgba(0,0,0,0.45);
+  z-index: 50; opacity: 0; visibility: hidden; transition: all 0.3s;
+}
+.overlay.on { opacity: 1; visibility: visible; }
+ 
+/* ── Header ── */
+.header {
+  position: relative; z-index: 20;
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 22px 26px;
+}
+.hdr-left { display: flex; align-items: center; gap: 10px; }
+ 
+.icon-btn {
+  width: 34px; height: 34px; display: grid; place-items: center;
+  border-radius: 10px; background: var(--surface); border: 1px solid var(--border);
+  color: var(--dim); transition: all 0.18s; flex-shrink: 0;
+}
+.icon-btn:hover { color: var(--text); background: rgba(255,255,255,0.08); }
+.icon-btn svg { display: block; }
+ 
+.wordmark {
+  font-family: var(--mono); font-size: 0.82rem; font-weight: 600;
+  letter-spacing: 0.18em; color: var(--dim);
+}
+ 
+.status-pip {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: var(--green); box-shadow: 0 0 8px var(--green);
+  animation: blink 2.8s ease-in-out infinite;
+}
+.status-pip.dead { background: var(--red); box-shadow: 0 0 6px var(--red); animation: none; }
+ 
+/* ── Mode pill ── */
+.mode-pill {
+  display: flex; background: rgba(255,255,255,0.04);
+  border: 1px solid var(--border); border-radius: 50px; padding: 3px; gap: 2px;
+}
+.mpill {
+  padding: 5px 18px; border-radius: 50px; border: none;
+  background: transparent; color: var(--dim); font-size: 0.77rem; font-weight: 500;
+  cursor: pointer; transition: all 0.2s ease; white-space: nowrap;
+}
+.mpill:hover { color: var(--text); }
+.mpill.on { background: rgba(255,255,255,0.1); color: var(--text); font-weight: 600; }
+ 
+/* ── Messages ── */
+.messages {
+  position: relative; z-index: 15;
+  flex: 1; overflow-y: auto; overflow-x: hidden;
+  padding: 12px 24px 0;
+  display: flex; flex-direction: column; gap: 10px;
+  scrollbar-width: none; min-height: 0;
+}
+.messages::-webkit-scrollbar { display: none; }
+ 
+.msg {
+  display: flex; gap: 9px; max-width: 640px; width: 100%;
+  margin: 0 auto; animation: fadeUp 0.28s ease;
+}
+.msg.user { flex-direction: row-reverse; }
+.bubble {
+  max-width: 82%; padding: 11px 15px;
+  border-radius: var(--r); font-size: 0.86rem; line-height: 1.62; word-wrap: break-word;
+}
+.msg.user .bubble {
+  background: rgba(0,212,255,0.08); border: 1px solid rgba(0,212,255,0.14);
+  border-top-right-radius: 3px;
+}
+.msg.assistant .bubble {
+  background: var(--surface); border: 1px solid var(--border);
+  border-top-left-radius: 3px;
+}
+ 
+/* ── Typing indicator ── */
+.typing-indicator {
+  display: flex; align-items: center; gap: 5px;
+  padding: 14px 16px; min-height: 44px;
+}
+.typing-dot {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: var(--dim);
+  animation: typingBounce 1.3s ease-in-out infinite;
+  flex-shrink: 0;
+}
+.typing-dot:nth-child(2) { animation-delay: 0.18s; }
+.typing-dot:nth-child(3) { animation-delay: 0.36s; }
+@keyframes typingBounce {
+  0%, 55%, 100% { transform: translateY(0); opacity: 0.4; }
+  28% { transform: translateY(-7px); opacity: 1; }
+}
+ 
+/* ── Orb center area ── */
+.orb-area {
+  position: relative; z-index: 10;
+  flex: 0 0 auto; display: flex; flex-direction: column; align-items: center;
+  padding: 20px 0 16px;
+}
+ 
+.state-label {
+  font-family: var(--mono); font-size: 0.72rem; font-weight: 500;
+  letter-spacing: 0.14em; text-transform: uppercase;
+  color: var(--dim); margin-top: 12px;
+  opacity: 0; transition: opacity 0.3s ease; min-height: 1em;
+}
+.state-label.show { opacity: 1; }
+ 
+/* ── Transcript ── */
+.transcript {
+  font-size: 0.83rem; color: var(--dim); font-style: italic;
+  text-align: center; min-height: 1.3em; max-width: 360px;
+  padding: 0 20px; transition: color 0.2s;
+}
+.transcript.final { color: var(--text); font-style: normal; }
+ 
+/* ── Bottom UI ── */
+.bottom {
+  position: relative; z-index: 20;
+  display: flex; flex-direction: column; align-items: center;
+  gap: 14px; padding: 16px 24px 28px;
+  padding-bottom: max(28px, env(safe-area-inset-bottom, 28px));
+}
+ 
+/* ── Chat input ── */
+.chat-bar {
+  width: min(560px, 100%);
+  display: flex; align-items: center; gap: 6px;
+  background: rgba(255,255,255,0.05);
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 50px; padding: 9px 9px 9px 18px;
+  backdrop-filter: blur(20px); transition: border-color 0.2s;
+}
+.chat-bar:focus-within {
+  border-color: rgba(0,212,255,0.28);
+  box-shadow: 0 0 0 3px rgba(0,212,255,0.05);
+}
+#chat-input {
+  flex: 1; background: none; border: none; outline: none;
+  color: var(--text); font-size: 0.87rem; font-family: var(--font);
+}
+#chat-input::placeholder { color: var(--dim); }
+ 
+.attach-btn {
+  width: 34px; height: 34px; display: grid; place-items: center;
+  border-radius: 50%; color: var(--dim); transition: all 0.18s;
+}
+.attach-btn:hover { color: var(--text); }
+ 
+.send-btn {
+  width: 36px; height: 36px; display: grid; place-items: center;
+  border-radius: 50%; background: var(--accent); color: #000;
+  transition: all 0.2s; flex-shrink: 0;
+}
+.send-btn:hover { opacity: 0.85; transform: scale(1.06); }
+.send-btn:disabled { opacity: 0.35; cursor: default; transform: none; }
+ 
+/* ── Voice controls ── */
+.voice-row { display: flex; align-items: center; gap: 22px; }
+ 
+.side-btn {
+  width: 44px; height: 44px; display: grid; place-items: center;
+  border-radius: 50%; border: 1px solid var(--border);
+  background: var(--surface); color: var(--dim); transition: all 0.2s;
+}
+.side-btn:hover { color: var(--text); background: rgba(255,255,255,0.08); border-color: rgba(255,255,255,0.14); }
+.side-btn.ghost { opacity: 0.3; cursor: not-allowed; }
+.side-btn.ghost:hover { opacity: 0.3; background: var(--surface); color: var(--dim); border-color: var(--border); }
+ 
+.mic-orb {
+  width: 68px; height: 68px; display: grid; place-items: center;
+  border-radius: 50%;
+  border: 1.5px solid rgba(255,255,255,0.14);
+  background: rgba(255,255,255,0.05);
+  color: var(--text); transition: all 0.25s; position: relative;
+}
+.mic-orb::before {
+  content: ''; position: absolute; inset: -9px; border-radius: 50%;
+  border: 1px solid rgba(255,255,255,0.04);
+}
+.mic-orb:hover { border-color: rgba(0,212,255,0.4); background: rgba(0,212,255,0.06); color: var(--accent); }
+.mic-orb.on {
+  border-color: rgba(255,60,60,0.6); background: rgba(255,60,60,0.08); color: var(--red);
+  animation: mic-ring 1.1s ease-in-out infinite;
+}
+.mic-orb.speaking { border-color: rgba(0,255,136,0.5); background: rgba(0,255,136,0.06); color: var(--green); animation: none; }
+ 
+@keyframes mic-ring {
+  0%,100% { box-shadow: 0 0 0 0 rgba(255,60,60,0.3); }
+  50% { box-shadow: 0 0 0 14px rgba(255,60,60,0); }
+}
+ 
+/* ── Show/hide per mode ── */
+.chat-ui, .voice-ui { display: none; width: 100%; justify-content: center; align-items: center; flex-direction: column; gap: 14px; }
+.chat-ui.on, .voice-ui.on { display: flex; }
+ 
+/* ── Hidden file input ── */
+#file-pick { display: none; }
+ 
+/* ── Animations ── */
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(7px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.35} }
+ 
+/* ── Responsive ── */
+@media (max-width: 600px) {
+  .header { padding: 18px 16px; }
+  .wordmark { display: none; }
+  .bottom { padding: 14px 16px 24px; }
+  .messages { padding: 12px 16px 0; }
+}
+
+/* ── Provider toggle ── */
+.provider-toggle {
+  display: flex; align-items: center; gap: 8px;
+  padding: 5px 12px 5px 5px;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid var(--border); border-radius: 50px;
+  cursor: pointer; transition: all 0.2s; user-select: none;
+}
+.provider-toggle:hover { background: rgba(255,255,255,0.07); border-color: rgba(255,255,255,0.14); }
+.provider-dot {
+  width: 22px; height: 22px; border-radius: 50%;
+  display: grid; place-items: center; flex-shrink: 0;
+  font-size: 0.6rem; font-weight: 700; letter-spacing: 0.04em;
+  transition: all 0.2s;
+}
+.provider-dot.sarvam  { background: rgba(255,160,0,0.18); color: #ffa000; border: 1px solid rgba(255,160,0,0.3); }
+.provider-dot.eleven  { background: rgba(168,85,247,0.18); color: #a855f7; border: 1px solid rgba(168,85,247,0.3); }
+.provider-label { font-size: 0.71rem; font-weight: 600; letter-spacing: 0.08em; color: var(--dim); transition: color 0.2s; }
+.provider-toggle:hover .provider-label { color: var(--text); }
+
+
+/* ── Sarvam voice selector ── */
+.voice-select-wrap {
+  position: fixed; bottom: 80px; right: 18px; z-index: 30;
+  display: none; flex-direction: column; align-items: flex-end; gap: 6px;
+}
+.voice-select-wrap.sarvam-active { display: flex; }
+.voice-select-label {
+  font-size: 0.63rem; font-weight: 600; letter-spacing: 0.1em;
+  text-transform: uppercase; color: var(--dim);
+}
+#voice-select {
+  background: rgba(6,6,12,0.95); border: 1px solid rgba(255,160,0,0.25);
+  border-radius: 10px; color: var(--text); font-family: var(--font);
+  font-size: 0.8rem; padding: 7px 28px 7px 12px; cursor: pointer;
+  outline: none; appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%23ffa000' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat; background-position: right 10px center;
+  transition: border-color 0.2s;
+}
+#voice-select:hover { border-color: rgba(255,160,0,0.5); }
+#voice-select option { background: #0d0d18; }
+
+
+/* ── ElevenLabs voice selector ── */
+.voice-select-wrap.eleven-active { display: flex; }
+#eleven-voice-select {
+  background: rgba(6,6,12,0.95); border: 1px solid rgba(168,85,247,0.25);
+  border-radius: 10px; color: var(--text); font-family: var(--font);
+  font-size: 0.8rem; padding: 7px 28px 7px 12px; cursor: pointer;
+  outline: none; appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%23a855f7' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat; background-position: right 10px center;
+  transition: border-color 0.2s;
+}
+#eleven-voice-select:hover { border-color: rgba(168,85,247,0.5); }
+#eleven-voice-select option { background: #0d0d18; }
+
+</style>
+</head>
+<body>
+<div class="app">
+ 
+  <!-- WebGL orb -->
+  <canvas id="orb"></canvas>
+ 
+  <!-- Sidebar -->
+  <aside class="sidebar" id="sidebar">
+    <div class="sb-head">
+      <span class="sb-title">Activity</span>
+      <button class="sb-close" id="sb-close" aria-label="Close sidebar">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
+    </div>
+    <div class="sb-body" id="sb-body">
+      <div class="sb-empty" id="sb-empty">No activity yet.<br>Say "Hey Arya" or tap the mic.</div>
+    </div>
+  </aside>
+ 
+  <div class="overlay" id="overlay"></div>
+ 
+  <!-- Header -->
+  <header class="header">
+    <div class="hdr-left">
+      <button class="icon-btn" id="sb-toggle" aria-label="Toggle activity">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+      </button>
+      <span class="wordmark">ARYA</span>
+    </div>
+    <div class="mode-pill">
+      <button class="mpill on" data-mode="voice">Voice</button>
+      <button class="mpill" data-mode="chat">Chat</button>
+    </div>
+    <div style="display:flex;align-items:center;gap:10px;">
+      <button class="provider-toggle" id="provider-toggle" title="Switch voice provider">
+        <span class="provider-dot eleven" id="provider-dot">EL</span>
+        <span class="provider-label" id="provider-label">ElevenLabs</span>
+      </button>
+      <div class="status-pip" id="status-pip"></div>
+    </div>
+  </header>
+ 
+  <!-- Messages -->
+  <div class="messages" id="messages"></div>
+ 
+  <!-- Orb center label -->
+  <div class="orb-area">
+    <div class="state-label" id="state-label"></div>
+    <div class="transcript" id="transcript"></div>
+  </div>
+ 
+  <!-- Bottom controls -->
+  <div class="bottom">
+ 
+    <!-- Voice mode -->
+    <div class="voice-ui on" id="voice-ui">
+      <div class="voice-row">
+        <button class="side-btn" id="attach-voice" title="Attach file">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+        </button>
+        <button class="mic-orb" id="mic-btn" title="Tap to speak">
+          <svg id="mic-icon" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
+          <svg id="stop-icon" width="22" height="22" viewBox="0 0 24 24" fill="currentColor" style="display:none"><rect x="5" y="5" width="14" height="14" rx="3"/></svg>
+        </button>
+        <button class="side-btn ghost" title="Camera — coming soon">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
+        </button>
+      </div>
+    </div>
+ 
+    <!-- Chat mode -->
+    <div class="chat-ui" id="chat-ui">
+      <div class="chat-bar">
+        <button class="attach-btn" id="attach-chat" title="Attach">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+        </button>
+        <input id="chat-input" type="text" placeholder="Ask me anything..." maxlength="8000" autocomplete="off">
+        <button class="send-btn" id="send-btn" disabled>
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+        </button>
+      </div>
+    </div>
+ 
+  </div>
+</div>
+ 
+  <!-- Sarvam voice selector (only visible when Sarvam is active) -->
+  <div class="voice-select-wrap" id="voice-select-wrap">
+    <span class="voice-select-label">Sarvam Voice</span>
+    <select id="voice-select">
+      <optgroup label="Female">
+        <option value="ishita" selected>Ishita — Dynamic</option>
+        <option value="shreya">Shreya — Authoritative</option>
+        <option value="kavya">Kavya</option>
+        <option value="simran">Simran</option>
+        <option value="neha">Neha</option>
+        <option value="priya">Priya</option>
+        <option value="pooja">Pooja</option>
+        <option value="ritu">Ritu</option>
+        <option value="roopa">Roopa</option>
+        <option value="tanya">Tanya</option>
+        <option value="shruti">Shruti</option>
+        <option value="suhani">Suhani</option>
+        <option value="sophia">Sophia</option>
+        <option value="amelia">Amelia</option>
+        <option value="kavitha">Kavitha</option>
+        <option value="rupali">Rupali</option>
+      </optgroup>
+      <optgroup label="Male">
+        <option value="shubh">Shubh — Friendly (default)</option>
+        <option value="manan">Manan — Conversational</option>
+        <option value="aditya">Aditya</option>
+        <option value="rahul">Rahul</option>
+        <option value="rohan">Rohan</option>
+        <option value="dev">Dev</option>
+      </optgroup>
+    </select>
+  </div>
+
+  <!-- ElevenLabs voice selector -->
+  <div class="voice-select-wrap" id="eleven-voice-select-wrap">
+    <span class="voice-select-label">ElevenLabs Voice</span>
+    <select id="eleven-voice-select">
+      <optgroup label="Your Voices">
+        <option value="uYXf8XasLslADfZ2MB4u" selected>Hope</option>
+        <option value="lcMyyd2HUfFzxdCaC4Ta">Lucy</option>
+      </optgroup>
+      <optgroup label="Built-in Female">
+        <option value="EXAVITQu4vr4xnSDxMaL">Bella</option>
+        <option value="MF3mGyEYCl7XYWbV9V6O">Elli</option>
+        <option value="XB0fDUnXU5powFXDhCwa">Charlotte</option>
+        <option value="Xb7hH8MSUJpSbSDYk0k2">Alice</option>
+        <option value="XrExE9yKIg1WjnnlVkGX">Matilda</option>
+        <option value="jsCqWAovK2LkecY7zXl4">Freya</option>
+        <option value="21m00Tcm4TlvDq8ikWAM">Rachel</option>
+      </optgroup>
+      <optgroup label="Built-in Male">
+        <option value="ErXwobaYiN019PkySvjV">Antoni</option>
+        <option value="TxGEqnHWrfWFTfGW9XjX">Josh</option>
+        <option value="VR6AewLTigWG4xSOukaG">Arnold</option>
+        <option value="pNInz6obpgDQGcFmaJgB">Adam</option>
+        <option value="yoZ06aMxZJJ28mfd3POQ">Sam</option>
+        <option value="AZnzlk1XvdvUeBnXmlld">Domi</option>
+      </optgroup>
+    </select>
+  </div>
+
+<input type="file" id="file-pick" accept="image/*,.pdf,.txt,.docx">
+ 
+<script>
+// ═══════════════════════════════════════════════════════════════
+// CONFIG  ← adjust to match your setup
+// ═══════════════════════════════════════════════════════════════
+const API     = 'http://localhost:5000';  // desktop_agent_server
+const TTS_API = 'http://localhost:5001';  // arya_voice_server
+
+// ── Voice Provider ─────────────────────────────────────────────
+// 'sarvam'    → Sarvam AI  (Saaras v3 STT + Bulbul v3 TTS)
+// 'elevenlabs' → ElevenLabs (original provider)
+// Toggle in UI or change default here:
+let VOICE_PROVIDER = 'elevenlabs';
+let SARVAM_VOICE    = 'ishita';         // default Sarvam female voice
+let ELEVENLABS_VOICE = 'uYXf8XasLslADfZ2MB4u'; // default ElevenLabs voice (Hope)
+ 
+// ── Porcupine ─────────────────────────────────────────────────
+// ⚠️ INSERT YOUR PICOVOICE ACCESS KEY HERE:
+// Get free key at: https://console.picovoice.ai/
+const PORCUPINE_ACCESS_KEY ='REDACTED';
+ 
+// Paths relative to where this HTML is served
+// Place both files in the same folder as arya.html
+const PPN_FILE    = '/hey-arya_en_wasm_v4_0_0.ppn';  // ← actual filename in your folder
+const PPN_MODEL   = '/porcupine_params.pv';            // ← actual filename in your folder
+ 
+// ── Conversation config ───────────────────────────────────────
+const EXIT_PHRASES = [
+  'thanks arya', 'thank you arya', "that's enough", 'goodbye', 'good bye',
+  'bye arya', 'see you', 'stop listening'
+];
+// NOTE: removed 'close', 'exit', 'quit' — too generic, clash with "close VS Code" etc.
+const INTERRUPT_PHRASES = ['stop', 'wait', 'hold on', 'quiet', 'shut up'];
+ 
+// ═══════════════════════════════════════════════════════════════
+// STATE
+// ═══════════════════════════════════════════════════════════════
+let mode               = 'voice';  // 'voice' | 'chat'
+let orbState           = 0;        // 0=idle 1=listening 2=thinking 3=speaking
+let isStreaming        = false;
+let isListening        = false;
+let conversationActive = false;
+let wakeListening      = false;
+let sessionId          = null;
+let sidebarOpen        = false;
+let currentAudio       = null;     // HTML5 Audio element for TTS
+let speakGeneration    = 0;         // increments on every speak() call — stale calls self-exit
+let speakAbortCtrl     = null;      // AbortController for fetch — cancelled on interrupt
+let isSpeaking         = false;
+let porcupine          = null;     // Porcupine engine instance
+let porcupineActive    = false;    // Whether Porcupine mic is subscribed
+ 
+// ═══════════════════════════════════════════════════════════════
+// DOM
+// ═══════════════════════════════════════════════════════════════
+const $ = id => document.getElementById(id);
+const sidebar    = $('sidebar');
+const sbToggle   = $('sb-toggle');
+const sbClose    = $('sb-close');
+const sbBody     = $('sb-body');
+const sbEmpty    = $('sb-empty');
+const overlay    = $('overlay');
+const messages   = $('messages');
+const stateLabel = $('state-label');
+const transcript = $('transcript');
+const micBtn     = $('mic-btn');
+const micIcon    = $('mic-icon');
+const stopIcon   = $('stop-icon');
+const voiceUI    = $('voice-ui');
+const chatUI     = $('chat-ui');
+const chatInput  = $('chat-input');
+const sendBtn    = $('send-btn');
+const statusPip  = $('status-pip');
+const filePick   = $('file-pick');
+ 
+// ═══════════════════════════════════════════════════════════════
+// WebGL — Raymarched fluid water sphere orb
+// ═══════════════════════════════════════════════════════════════
+const canvas = $('orb');
+const gl = canvas.getContext('webgl', { alpha: true, premultipliedAlpha: false, antialias: true });
+ 
+const VERT_SRC = `
+  precision highp float;
+  attribute vec2 a_pos;
+  varying vec2 v_uv;
+  void main() { v_uv = a_pos; gl_Position = vec4(a_pos, 0.0, 1.0); }
+`;
+ 
+const FRAG_SRC = `
+  precision highp float;
+  uniform float uT;
+  uniform float uA;
+  uniform int   uS;
+  uniform vec2  uR;
+  varying vec2  v_uv;
+ 
+  float h3(vec3 p) {
+    p = fract(p*vec3(0.1031,0.11369,0.13787));
+    p += dot(p, p.yxz+19.19);
+    return fract((p.x+p.y)*p.z);
+  }
+  float ns(vec3 p) {
+    vec3 i=floor(p), f=fract(p);
+    f = f*f*(3.0-2.0*f);
+    return mix(
+      mix(mix(h3(i),h3(i+vec3(1,0,0)),f.x), mix(h3(i+vec3(0,1,0)),h3(i+vec3(1,1,0)),f.x),f.y),
+      mix(mix(h3(i+vec3(0,0,1)),h3(i+vec3(1,0,1)),f.x), mix(h3(i+vec3(0,1,1)),h3(i+vec3(1,1,1)),f.x),f.y),f.z);
+  }
+  float fbm(vec3 p) {
+    float v=0.0, a=0.5;
+    for(int i=0;i<5;i++) { v+=a*ns(p); p=p*2.1+vec3(1.7,9.2,3.1); a*=0.45; }
+    return v;
+  }
+  mat2 rot2(float a) { float c=cos(a),s=sin(a); return mat2(c,-s,s,c); }
+ 
+  float sdSphere(vec3 p, float r) { return length(p) - r; }
+ 
+  float scene(vec3 p) {
+    p.xz = rot2(uT * 0.14) * p.xz;
+    p.xy = rot2(uT * 0.05) * p.xy;
+    float speed = 0.38;
+    if(uS==1) speed = 0.55;
+    if(uS==2) speed = 0.72;
+    if(uS==3) speed = 0.48;
+    float disp = fbm(p * 3.2 + uT * speed) * (0.06 + uA * 0.32);
+    float r = 0.44 + uA * 0.10;
+    return sdSphere(p, r) + disp;
+  }
+ 
+  vec3 calcN(vec3 p) {
+    const float e = 0.0006;
+    return normalize(vec3(
+      scene(p+vec3(e,0,0))-scene(p-vec3(e,0,0)),
+      scene(p+vec3(0,e,0))-scene(p-vec3(0,e,0)),
+      scene(p+vec3(0,0,e))-scene(p-vec3(0,0,e))
+    ));
+  }
+ 
+  void main() {
+    vec2 uv = (gl_FragCoord.xy*2.0 - uR) / min(uR.x, uR.y);
+    vec3 ro = vec3(0.0, 0.0, 2.4);
+    vec3 rd = normalize(vec3(uv.x, uv.y, -1.3));
+    float t = 0.2; bool hit = false;
+    for(int i=0;i<90;i++) {
+      vec3 p = ro + rd*t;
+      float d = scene(p);
+      if(d < 0.0016) { hit = true; break; }
+      if(t > 8.0) break;
+      t += d * 0.62;
+    }
+    vec4 col = vec4(0.0);
+    if(hit) {
+      vec3 p = ro + rd*t;
+      vec3 n = calcN(p);
+      vec3 L1 = normalize(vec3(1.3, 2.2, 1.8));
+      vec3 L2 = normalize(vec3(-1.4, 0.4, 0.6));
+      float d1 = max(dot(n,L1), 0.0);
+      float d2 = max(dot(n,L2), 0.0)*0.38;
+      vec3 H   = normalize(L1-rd);
+      float sp1 = pow(max(dot(n,H),0.0), 90.0);
+      float sp2 = pow(max(dot(n,H),0.0), 250.0);
+      float fr  = pow(1.0-abs(dot(n,-rd)), 2.8);
+      vec3 sc = vec3(0.55, 0.58, 0.62);
+      if(uS==0) sc = vec3(0.40, 0.65, 1.00);
+      if(uS==1) sc = mix(sc, vec3(0.15,0.72,1.0 ), 0.65);
+      if(uS==2) sc = mix(sc, vec3(0.55,0.20,1.0 ), 0.65);
+      if(uS==3) sc = mix(sc, vec3(0.05,1.0, 0.52), 0.62);
+      vec3 c = sc*(d1+d2+0.10) + vec3(1.0)*sp1*2.2 + sc*sp2*2.8 + sc*fr*3.0;
+      float a = clamp(fr*2.0 + sp1*0.95 + 0.08, 0.0, 1.0);
+      col = vec4(c*a, a);
+    }
+    vec2 center = vec2(0.0, 0.0);
+    float dist = length(uv - center);
+    vec3 gc = vec3(0.20, 0.28, 0.35);
+    if(uS==0) gc = vec3(0.20, 0.45, 0.80);
+    if(uS==1) gc = vec3(0.00, 0.55, 1.00);
+    if(uS==2) gc = vec3(0.45, 0.10, 1.00);
+    if(uS==3) gc = vec3(0.00, 0.90, 0.38);
+    float gr = 0.58 + uA * 0.14;
+    float glow = smoothstep(gr+0.45, gr, dist)*0.06 + smoothstep(gr+0.20, gr-0.05, dist)*0.05;
+    vec4 gcol = vec4(gc*glow, glow*0.5);
+    gl_FragColor = gcol*(1.0-col.a) + col;
+  }
+`;
+ 
+function mkShader(type, src) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src); gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) { console.error(gl.getShaderInfoLog(s)); return null; }
+  return s;
+}
+ 
+let prog, uT_loc, uA_loc, uS_loc, uR_loc;
+ 
+function initGL() {
+  if (!gl) return;
+  const vs = mkShader(gl.VERTEX_SHADER, VERT_SRC);
+  const fs = mkShader(gl.FRAGMENT_SHADER, FRAG_SRC);
+  if (!vs || !fs) return;
+  prog = gl.createProgram();
+  gl.attachShader(prog, vs); gl.attachShader(prog, fs);
+  gl.linkProgram(prog);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) { console.error(gl.getProgramInfoLog(prog)); return; }
+  gl.useProgram(prog);
+  const quad = new Float32Array([-1,-1, 3,-1, -1,3]);
+  const buf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  gl.bufferData(gl.ARRAY_BUFFER, quad, gl.STATIC_DRAW);
+  const loc = gl.getAttribLocation(prog, 'a_pos');
+  gl.enableVertexAttribArray(loc);
+  gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+  uT_loc = gl.getUniformLocation(prog, 'uT');
+  uA_loc = gl.getUniformLocation(prog, 'uA');
+  uS_loc = gl.getUniformLocation(prog, 'uS');
+  uR_loc = gl.getUniformLocation(prog, 'uR');
+  gl.enable(gl.BLEND);
+  gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+}
+ 
+function resizeCanvas() {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  canvas.width  = innerWidth  * dpr;
+  canvas.height = innerHeight * dpr;
+  if (gl) gl.viewport(0, 0, canvas.width, canvas.height);
+}
+ 
+const t0 = Date.now();
+let smoothAudio = 0;
+ 
+function frame() {
+  requestAnimationFrame(frame);
+  if (!prog) return;
+  const t = (Date.now() - t0) * 0.001;
+  const connected = !statusPip.classList.contains('dead');
+  let target = 0;
+  if      (orbState === 0 && !connected) target = 0.03 + Math.sin(t * 0.5)  * 0.02;
+  else if (orbState === 0)               target = 0.07 + Math.sin(t * 0.75) * 0.05;
+  else if (orbState === 1)               target = 0.35 + Math.sin(t * 5.0)  * 0.20;
+  else if (orbState === 2)               target = 0.25 + Math.sin(t * 2.2)  * 0.12 + Math.sin(t * 4.7) * 0.08;
+  else if (orbState === 3)               target = 0.55 + Math.sin(t * 6.0)  * 0.28;
+  smoothAudio += (target - smoothAudio) * 0.12;
+  gl.clearColor(0,0,0,0); gl.clear(gl.COLOR_BUFFER_BIT);
+  gl.useProgram(prog);
+  gl.uniform1f(uT_loc, t);
+  gl.uniform1f(uA_loc, smoothAudio);
+  gl.uniform1i(uS_loc, orbState);
+  gl.uniform2f(uR_loc, canvas.width, canvas.height);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+}
+ 
+// ═══════════════════════════════════════════════════════════════
+// SIDEBAR
+// ═══════════════════════════════════════════════════════════════
+function openSidebar()  { sidebar.classList.add('open'); overlay.classList.add('on'); sidebarOpen = true; }
+function closeSidebar() { sidebar.classList.remove('open'); overlay.classList.remove('on'); sidebarOpen = false; }
+sbToggle.addEventListener('click', () => sidebarOpen ? closeSidebar() : openSidebar());
+sbClose.addEventListener('click', closeSidebar);
+overlay.addEventListener('click', closeSidebar);
+ 
+function logActivity(label, detail) {
+  if (sbEmpty) sbEmpty.style.display = 'none';
+  const el = document.createElement('div');
+  el.className = 'activity-item';
+  el.innerHTML = `<div class="activity-label">${label}</div><div class="activity-detail">${detail}</div>`;
+  sbBody.appendChild(el);
+  sbBody.scrollTop = sbBody.scrollHeight;
+}
+ 
+// ═══════════════════════════════════════════════════════════════
+// MODE TOGGLE
+// ═══════════════════════════════════════════════════════════════
+document.querySelectorAll('.mpill').forEach(btn => {
+  btn.addEventListener('click', () => {
+    mode = btn.dataset.mode;
+    document.querySelectorAll('.mpill').forEach(b => b.classList.toggle('on', b === btn));
+    voiceUI.classList.toggle('on', mode === 'voice');
+    chatUI.classList.toggle('on',  mode === 'chat');
+    if (mode === 'chat') {
+      stopConversation();
+      stopWakeListen();
+    } else {
+      startWakeListen();
+    }
+    stateLabel.textContent = '';
+    stateLabel.classList.remove('show');
+  });
+});
+ 
+// ═══════════════════════════════════════════════════════════════
+// ORB STATE
+// ═══════════════════════════════════════════════════════════════
+const STATE_LABELS = ['', 'Listening...', 'Thinking...', 'Speaking'];
+ 
+function setOrb(state) {
+  orbState = state;
+  const label = STATE_LABELS[state] || '';
+  stateLabel.textContent = label;
+  stateLabel.classList.toggle('show', !!label);
+}
+ 
+// ═══════════════════════════════════════════════════════════════
+// MESSAGES + TYPING INDICATOR
+// ═══════════════════════════════════════════════════════════════
+function scrollToBottom() {
+  // smooth scroll to latest message
+  messages.scrollTo({ top: messages.scrollHeight, behavior: 'smooth' });
+}
+ 
+function addMsg(role, text) {
+  const d = document.createElement('div');
+  d.className = `msg ${role}`;
+  const b = document.createElement('div');
+  b.className = 'bubble';
+  b.textContent = text;
+  d.appendChild(b);
+  messages.appendChild(d);
+  scrollToBottom();
+  return b;
+}
+ 
+// Show animated dots while waiting for first chunk
+function showTypingIndicator() {
+  removeTypingIndicator(); // ensure only one exists
+  const d = document.createElement('div');
+  d.className = 'msg assistant';
+  d.id = 'typing-indicator-row';
+  const b = document.createElement('div');
+  b.className = 'bubble typing-indicator';
+  b.innerHTML = '<span class="typing-dot"></span><span class="typing-dot"></span><span class="typing-dot"></span>';
+  d.appendChild(b);
+  messages.appendChild(d);
+  scrollToBottom();
+}
+ 
+function removeTypingIndicator() {
+  const el = $('typing-indicator-row');
+  if (el) el.remove();
+}
+ 
+// ═══════════════════════════════════════════════════════════════
+// INTERRUPT LISTENER — Volume-based (same approach as conversation.py)
+//
+// conversation.py reads raw PCM every 100 ms and stops if
+// avg_volume > 500 (on 16-bit signed PCM). We mirror that here
+// using Web Audio AnalyserNode on the existing mic stream.
+//
+// Why this beats SpeechRecognition:
+//   • Instant — no transcription latency (reacts in <50 ms)
+//   • No mic conflicts — reads the same getUserMedia stream
+//   • Works even if the user just clears their throat / says anything
+//
+// INTERRUPT_VOL: 0-255 frequency average. Raise if Arya interrupts
+//   herself (speaker echo); lower if she doesn't hear you.
+// INTERRUPT_GRACE_MS: ignore volume for this many ms after TTS
+//   starts — prevents the speaker output from triggering itself.
+// ═══════════════════════════════════════════════════════════════
+// INTERRUPT LISTENER — mirrors conversation.py check_for_interruption()
+//
+// conversation.py reads raw 16-bit PCM frames and checks:
+//   avg_volume = avg(abs(sample)) > 500   (on int16 range ±32768)
+//
+// Browser equivalent:
+//   getByteTimeDomainData() → 0–255 centered at 128
+//   deviation = avg(abs(sample - 128))
+//   500 / 32768 * 128 ≈ 1.95 → threshold of 2 deviation units
+//
+// With earphones the mic hears ZERO speaker output, so a low
+// threshold works perfectly — exactly like conversation.py.
+//
+// INTERRUPT_AMP:  raw amplitude threshold (2 = same as py's 500/32768)
+// INTERRUPT_GRACE_MS: brief dead zone right after TTS starts
+// INTERRUPT_CONSEC_MS: user must be loud for this many ms (not a click)
+// ═══════════════════════════════════════════════════════════════
+const INTERRUPT_AMP       = 3;    // deviation from 128 — earphones: mic only hears your voice
+const INTERRUPT_GRACE_MS  = 600;  // ignore first 600ms of TTS (any transient pop)
+const INTERRUPT_CONSEC_MS = 80;   // voice must be sustained 80ms — filters clicks/pops
+
+let intAudioCtx    = null;
+let intAnalyser    = null;
+let intAnimFrame   = null;
+let intStartedAt   = 0;
+let intLoudSince   = null;  // timestamp when voice first crossed threshold
+
+function startInterruptListener() {
+  if (!conversationActive || !isSpeaking) return;
+
+  getMicStream().then(stream => {
+    if (!stream || !isSpeaking) return;
+    try {
+      intAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      intAnalyser = intAudioCtx.createAnalyser();
+      intAnalyser.fftSize = 256;
+      intAudioCtx.createMediaStreamSource(stream).connect(intAnalyser);
+
+      // TIME DOMAIN data (raw amplitude) — mirrors conversation.py struct.unpack PCM
+      const buf = new Uint8Array(intAnalyser.fftSize);
+      intStartedAt = Date.now();
+      intLoudSince = null;
+
+      function tick() {
+        if (!isSpeaking) { stopInterruptListener(); return; }
+
+        // Grace period — ignore very start of TTS
+        if (Date.now() - intStartedAt < INTERRUPT_GRACE_MS) {
+          intAnimFrame = requestAnimationFrame(tick);
+          return;
+        }
+
+        // Raw amplitude: same as conversation.py avg(abs(pcm_sample))
+        // getByteTimeDomainData gives 0-255 centered at 128
+        intAnalyser.getByteTimeDomainData(buf);
+        let sum = 0;
+        for (let i = 0; i < buf.length; i++) sum += Math.abs(buf[i] - 128);
+        const amp = sum / buf.length;  // 0–128 scale, equivalent to py's 0–32768 / 256
+
+        if (amp > INTERRUPT_AMP) {
+          if (!intLoudSince) intLoudSince = Date.now();
+          else if (Date.now() - intLoudSince >= INTERRUPT_CONSEC_MS) {
+            // Sustained voice detected — interrupt
+            console.log('[Interrupt] voice amp=' + amp.toFixed(2) + ' sustained — stopping TTS');
+            stopInterruptListener();
+            stopSpeaking();
+            transcript.textContent = '';
+            if (conversationActive) setTimeout(() => startCommandListen(), 300);
+            return;
+          }
+        } else {
+          intLoudSince = null;  // reset on quiet
+        }
+
+        intAnimFrame = requestAnimationFrame(tick);
+      }
+      intAnimFrame = requestAnimationFrame(tick);
+
+    } catch(e) {
+      console.warn('[Interrupt] error:', e);
+    }
+  });
+}
+
+function stopInterruptListener() {
+  intLoudSince  = null;
+  if (intAnimFrame) { cancelAnimationFrame(intAnimFrame); intAnimFrame = null; }
+  if (intAudioCtx)  { try { intAudioCtx.close(); } catch(e) {} intAudioCtx = null; intAnalyser = null; }
+}
+ 
+// ═══════════════════════════════════════════════════════════════
+// TTS — streaming audio from voice server, played in browser
+// Uses MediaSource Extensions so audio starts in ~200 ms (no
+// waiting for the full clip to download).  Falls back to blob
+// on browsers without MSE support or for WAV files.
+// ═══════════════════════════════════════════════════════════════
+async function speak(text) {
+  if (!text || text === '...') return;
+  stopSpeaking();                              // increments speakGeneration, aborts old fetch
+
+  const myGen = speakGeneration;              // capture MY generation
+  speakAbortCtrl = new AbortController();
+
+  isSpeaking = true;
+  micBtn.classList.add('speaking');
+ 
+  try {
+    const res = await fetch(`${TTS_API}/speak`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text, stream: true, provider: VOICE_PROVIDER, voice: SARVAM_VOICE, voice_id: ELEVENLABS_VOICE }),
+      signal: speakAbortCtrl.signal
+    });
+    if (myGen !== speakGeneration) return;     // interrupted before response arrived
+ 
+    if (!res.ok) throw new Error(`TTS HTTP ${res.status}`);
+ 
+    const contentType = res.headers.get('content-type') || '';
+
+    if (contentType.includes('audio') || contentType.includes('octet')) {
+
+      // ── Try MediaSource streaming first (Chrome / Edge) ──────────
+      // Strip MIME params (e.g. "audio/mpeg; charset=utf-8") before testing support
+      const mimeBase   = contentType.split(';')[0].trim();
+      const mseSupported = typeof MediaSource !== 'undefined' &&
+                           (MediaSource.isTypeSupported(mimeBase) ||
+                            MediaSource.isTypeSupported('audio/mpeg'));
+      const mseType = MediaSource.isTypeSupported(mimeBase) ? mimeBase : 'audio/mpeg';
+
+      if (mseSupported && res.body) {
+        const ms    = new MediaSource();
+        const audio = new Audio();
+        currentAudio = audio;
+        const msUrl = URL.createObjectURL(ms);
+        audio.src = msUrl;
+
+        await new Promise((resolve) => {
+          let sb          = null;
+          const queue     = [];
+          let streamDone  = false;
+          let appendBusy  = false;
+
+          // Poll for interrupt every 100ms — resolves zombie if stopSpeaking() was called
+          const genCheck = setInterval(() => {
+            if (myGen !== speakGeneration) {
+              clearInterval(genCheck);
+              try { audio.pause(); audio.src = ''; } catch(e) {}
+              try { ms.endOfStream(); } catch(e) {}
+              resolve();
+            }
+          }, 100);
+
+          function flush() {
+            if (appendBusy || !sb || sb.updating || queue.length === 0) return;
+            appendBusy = true;
+            try { sb.appendBuffer(queue.shift()); }
+            catch(e) { appendBusy = false; }
+          }
+
+          ms.addEventListener('sourceopen', async () => {
+            URL.revokeObjectURL(msUrl);
+            try {
+              sb = ms.addSourceBuffer(mseType);
+              sb.addEventListener('updateend', () => {
+                appendBusy = false;
+                if (streamDone && queue.length === 0) {
+                  try { ms.endOfStream(); } catch(e) {}
+                  return;
+                }
+                flush();
+              });
+
+              setOrb(3);
+              startInterruptListener();   // start monitoring mic for voice interrupt
+              audio.play().catch(() => {});
+
+              const reader = res.body.getReader();
+              while (true) {
+                if (myGen !== speakGeneration) {
+                  try { reader.cancel(); } catch(e) {}
+                  break;
+                }
+                const { done, value } = await reader.read();
+                if (done) {
+                  streamDone = true;
+                  if (sb && !sb.updating && queue.length === 0) {
+                    try { ms.endOfStream(); } catch(e) {}
+                  }
+                  break;
+                }
+                if (myGen !== speakGeneration) {
+                  try { reader.cancel(); } catch(e) {}
+                  break;
+                }
+                queue.push(value);
+                flush();
+              }
+            } catch (e) {
+              // ignore — genCheck will clean up
+            }
+          }, { once: true });
+
+          audio.addEventListener('ended', () => { clearInterval(genCheck); resolve(); }, { once: true });
+          audio.addEventListener('error', () => { clearInterval(genCheck); resolve(); }, { once: true });
+        });
+      } else {
+        // ── Blob fallback (Sarvam WAV / Safari / Firefox) ──────────
+        const blob = await res.blob();
+        if (myGen !== speakGeneration) return;  // interrupted during download
+
+        const url  = URL.createObjectURL(blob);
+        currentAudio = new Audio(url);
+
+        setOrb(3);
+        startInterruptListener();   // start monitoring mic for voice interrupt
+
+        await new Promise((resolve) => {
+          // Poll for interrupt — guarantees old audio dies even if pause() doesn't fire onerror
+          const genCheck = setInterval(() => {
+            if (myGen !== speakGeneration) {
+              clearInterval(genCheck);
+              try { currentAudio.pause(); currentAudio.src = ''; } catch(e) {}
+              URL.revokeObjectURL(url);
+              resolve();
+            }
+          }, 100);
+
+          currentAudio.onended = () => { clearInterval(genCheck); URL.revokeObjectURL(url); resolve(); };
+          currentAudio.onerror = () => { clearInterval(genCheck); URL.revokeObjectURL(url); resolve(); };
+          currentAudio.play().catch(() => { clearInterval(genCheck); URL.revokeObjectURL(url); resolve(); });
+        });
+      }
+    } else {
+      // ── Server-side playback fallback (stream:false mode) ─────────
+      const words = text.split(/\s+/).length;
+      setOrb(3);
+      await new Promise(r => setTimeout(r, Math.max(2000, words * 120) + 400));
+    }
+  } catch (err) {
+    if (myGen !== speakGeneration) return;
+    if (err && err.name === 'AbortError') return;
+    console.error("TTS Error:", err);
+    // Error fallback: wait estimated duration then continue
+    setOrb(3);
+    const words = text.split(/\s+/).length;
+    await new Promise(r => setTimeout(r, Math.max(1500, words * 100)));
+  } finally {
+    if (myGen !== speakGeneration) return;  // interrupted — new speak() owns state
+    stopInterruptListener();
+    isSpeaking = false;
+    currentAudio = null;
+    speakAbortCtrl = null;
+    micBtn.classList.remove('speaking');
+    setOrb(conversationActive ? 1 : 0);
+    if (conversationActive && mode === 'voice') {
+      stateLabel.textContent = 'Listening...';
+      stateLabel.classList.add('show');
+      // Start recording only after ARYA fully finishes — 1200ms lets speaker echo die
+      if (!isStreaming) setTimeout(() => startCommandListen(), 1200);
+    }
+  }
+}
+ 
+function stopSpeaking() {
+  speakGeneration++;                           // invalidate any running speak() call
+  if (speakAbortCtrl) {
+    try { speakAbortCtrl.abort(); } catch(e) {}
+    speakAbortCtrl = null;
+  }
+  stopInterruptListener();
+  if (currentAudio) {
+    try { currentAudio.pause(); currentAudio.src = ''; } catch(e) {}
+    currentAudio = null;
+  }
+  isSpeaking = false;
+  micBtn.classList.remove('speaking');
+  fetch(`${TTS_API}/stop`, { method: 'POST' }).catch(() => {});
+}
+ 
+// ═══════════════════════════════════════════════════════════════
+// PORCUPINE — offline wake word detection
+// ═══════════════════════════════════════════════════════════════
+ 
+// Called when Porcupine detects "Hey Arya"
+function onWakeWord() {
+  console.log('[Porcupine] Wake word detected!');
+  logActivity('Wake word', '"Hey Arya" detected — starting conversation');
+  stopWakeListen();
+  startConversation();
+}
+ 
+// Initialize the Porcupine engine (called once on load)
+async function initPorcupine() {
+  // Check that SDK is available
+  if (typeof PorcupineWeb === 'undefined' || typeof WebVoiceProcessor === 'undefined') {
+    console.warn('[Porcupine] SDK not loaded — falling back to Web Speech wake word');
+    initFallbackWake();
+    return;
+  }
+ 
+  if (PORCUPINE_ACCESS_KEY === 'YOUR_PORCUPINE_ACCESS_KEY') {
+    console.warn('[Porcupine] No AccessKey set — falling back to Web Speech wake word');
+    logActivity('Wake word', 'Porcupine key not set — using Web Speech fallback');
+    initFallbackWake();
+    return;
+  }
+ 
+  try {
+    // Create PorcupineWorker with custom keyword
+    porcupine = await PorcupineWeb.PorcupineWorker.create(
+      PORCUPINE_ACCESS_KEY,
+      // Keyword: your custom .ppn file
+      [{ publicPath: PPN_FILE, label: 'hey-arya', forceWrite: true }],
+      // Detection callback
+      (detectionResult) => {
+        if (detectionResult.label === 'hey-arya' && wakeListening && mode === 'voice') {
+          onWakeWord();
+        }
+      },
+      // Language model
+      { publicPath: PPN_MODEL, forceWrite: true }
+    );
+ 
+    console.log('[Porcupine] Engine initialized ✅');
+    logActivity('Wake word', 'Porcupine offline wake word ready');
+ 
+  } catch (err) {
+    console.warn('[Porcupine] Init failed:', err.message || err);
+    logActivity('Wake word', 'Porcupine failed — using Web Speech fallback');
+    initFallbackWake();
+  }
+}
+ 
+async function startWakeListen() {
+  if (wakeListening || mode !== 'voice' || conversationActive) return;
+ 
+  wakeListening = true;
+  transcript.textContent = '';
+  stateLabel.textContent = 'Say "Hey Arya"';
+  stateLabel.classList.add('show');
+  setOrb(0);
+ 
+  // Use Porcupine if available and initialized, else fallback
+  if (porcupine) {
+    try {
+      await WebVoiceProcessor.WebVoiceProcessor.subscribe(porcupine);
+      porcupineActive = true;
+      console.log('[Porcupine] Listening for wake word...');
+    } catch (err) {
+      console.warn('[Porcupine] Subscribe failed:', err);
+      porcupineActive = false;
+      startFallbackWake();
+    }
+  } else {
+    startFallbackWake();
+  }
+}
+ 
+async function stopWakeListen() {
+  wakeListening = false;
+ 
+  if (porcupine && porcupineActive) {
+    try {
+      await WebVoiceProcessor.WebVoiceProcessor.unsubscribe(porcupine);
+      porcupineActive = false;
+      console.log('[Porcupine] Unsubscribed from mic');
+    } catch (err) {
+      console.warn('[Porcupine] Unsubscribe failed:', err);
+      porcupineActive = false;
+    }
+  } else {
+    stopFallbackWake();
+  }
+}
+ 
+// ═══════════════════════════════════════════════════════════════
+// FALLBACK WAKE WORD — Web Speech API (when Porcupine unavailable)
+// ═══════════════════════════════════════════════════════════════
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+let fallbackWake = null;
+let fallbackWakeActive = false;
+ 
+function initFallbackWake() {
+  if (!SR) { console.warn('No SpeechRecognition available'); return; }
+  fallbackWake = new SR();
+  fallbackWake.continuous = true;
+  fallbackWake.interimResults = true;
+  fallbackWake.lang = 'en-US';
+ 
+  fallbackWake.onresult = e => {
+    if (!wakeListening) return;
+    for (const r of e.results) {
+      const t = r[0].transcript.toLowerCase().trim();
+      console.log('[FallbackWake] heard:', t);  // visible in DevTools console
+      if (t.includes('hey arya') || t.includes('arya') || t.includes('hey aria')) {
+        console.log('[FallbackWake] Wake word matched:', t);
+        stopFallbackWake();
+        startConversation();
+        return;
+      }
+    }
+  };
+  fallbackWake.onend = () => {
+    if (wakeListening && mode === 'voice') {
+      setTimeout(() => { try { fallbackWake.start(); } catch(e) {} }, 300);
+    }
+  };
+  fallbackWake.onerror = e => {
+    if (e.error === 'aborted' || e.error === 'no-speech') return;
+    console.warn('[FallbackWake] error:', e.error);
+  };
+}
+ 
+function startFallbackWake() {
+  if (!fallbackWake || fallbackWakeActive) return;
+  fallbackWakeActive = true;
+  wakeListening = true;
+  transcript.textContent = '';
+  stateLabel.textContent = 'Say "Hey Arya"';
+  stateLabel.classList.add('show');
+  setOrb(0);
+  try { fallbackWake.start(); } catch(e) {}
+}
+ 
+function stopFallbackWake() {
+  fallbackWakeActive = false;
+  if (fallbackWake) try { fallbackWake.stop(); } catch(e) {}
+}
+ 
+// ═══════════════════════════════════════════════════════════════
+// COMMAND RECOGNITION — MediaRecorder + Groq STT
+// One continuous mic stream, no handover, no aborted errors
+// Same approach as arya_conversation.py
+// ═══════════════════════════════════════════════════════════════
+let micStream       = null;   // getUserMedia stream (kept alive)
+let mediaRecorder   = null;
+let audioChunks     = [];
+let silenceTimer    = null;
+let analyser        = null;
+let audioCtx        = null;
+let isRecording     = false;
+ 
+const SILENCE_THRESHOLD = 12;   // 0-255 freq avg — below this = silence
+const VOICE_THRESHOLD   = 20;   // must exceed this first before silence timer starts
+const SILENCE_DURATION  = 1400; // ms of silence AFTER voice detected before auto-stop
+const MAX_RECORD_MS     = 8000; // hard cap on recording length
+ 
+// Get mic stream once and reuse it forever
+async function getMicStream() {
+  if (micStream && micStream.active) return micStream;
+  try {
+    micStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+    console.log('[Mic] Stream acquired');
+    return micStream;
+  } catch (e) {
+    console.error('[Mic] getUserMedia failed:', e);
+    logActivity('Mic error', e.message || 'Could not access microphone');
+    return null;
+  }
+}
+ 
+// Monitor volume and auto-stop when user stops speaking
+function startSilenceDetection(stream) {
+  if (!window.AudioContext && !window.webkitAudioContext) return;
+  audioCtx  = new (window.AudioContext || window.webkitAudioContext)();
+  analyser  = audioCtx.createAnalyser();
+  analyser.fftSize = 256;
+  const src = audioCtx.createMediaStreamSource(stream);
+  src.connect(analyser);
+ 
+  const buf = new Uint8Array(analyser.frequencyBinCount);
+  let silenceStart  = null;
+  let voiceDetected = false;  // don't start silence timer until user actually speaks
+
+  function check() {
+    if (!isRecording) return;
+    analyser.getByteFrequencyData(buf);
+    const avg = buf.reduce((a, b) => a + b, 0) / buf.length;
+
+    if (avg >= VOICE_THRESHOLD) {
+      voiceDetected = true;   // user has spoken — now we can time silence
+      silenceStart  = null;   // reset silence clock on any voice
+    }
+
+    if (voiceDetected && avg < SILENCE_THRESHOLD) {
+      if (!silenceStart) silenceStart = Date.now();
+      else if (Date.now() - silenceStart > SILENCE_DURATION) {
+        console.log('[Mic] Silence detected after voice — stopping recording');
+        stopCommandListen();
+        return;
+      }
+    } else if (avg >= SILENCE_THRESHOLD) {
+      silenceStart = null; // reset on sound
+    }
+    requestAnimationFrame(check);
+  }
+  requestAnimationFrame(check);
+}
+ 
+function stopSilenceDetection() {
+  if (audioCtx) {
+    try { audioCtx.close(); } catch(e) {}
+    audioCtx = null;
+    analyser = null;
+  }
+}
+ 
+async function startCommandListen() {
+  if (isRecording || isStreaming || isSpeaking) return;
+ 
+  const stream = await getMicStream();
+  if (!stream) return;
+ 
+  setCommandListening(true);
+  transcript.textContent = '';
+  audioChunks = [];
+  isRecording = true;
+ 
+  // Prefer webm/opus, fall back to whatever browser supports
+  const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+    ? 'audio/webm;codecs=opus'
+    : MediaRecorder.isTypeSupported('audio/webm')
+      ? 'audio/webm'
+      : '';
+ 
+  mediaRecorder = mimeType
+    ? new MediaRecorder(stream, { mimeType })
+    : new MediaRecorder(stream);
+ 
+  mediaRecorder.ondataavailable = e => {
+    if (e.data && e.data.size > 0) audioChunks.push(e.data);
+  };
+ 
+  mediaRecorder.onstop = async () => {
+    isRecording = false;
+    stopSilenceDetection();
+    setCommandListening(false);
+ 
+    if (audioChunks.length === 0) {
+      if (conversationActive && !isStreaming && !isSpeaking) {
+        setTimeout(() => startCommandListen(), 300);
+      }
+      return;
+    }
+ 
+    const blob = new Blob(audioChunks, { type: mediaRecorder.mimeType || 'audio/webm' });
+    audioChunks = [];
+ 
+    // Send to /transcribe (Groq Whisper)
+    transcript.textContent = '…';
+    try {
+      const form = new FormData();
+      form.append('audio', blob, 'command.webm');
+      const res = await fetch(`${TTS_API}/transcribe`, { method: 'POST', body: form });
+      const data = await res.json();
+      const text = (data.text || '').trim();
+ 
+      if (!text) {
+        if (conversationActive && !isStreaming && !isSpeaking) {
+          setTimeout(() => startCommandListen(), 300);
+        }
+        return;
+      }
+ 
+      transcript.textContent = text;
+      transcript.classList.add('final');
+      console.log('[Groq STT] heard:', text);
+ 
+      const lower = text.toLowerCase();
+ 
+      // Interrupt while speaking
+      if (isSpeaking && INTERRUPT_PHRASES.some(p => lower.includes(p))) {
+        stopSpeaking();
+        transcript.textContent = '';
+        if (conversationActive) setTimeout(() => startCommandListen(), 500);
+        return;
+      }
+ 
+      // Exit phrase
+      if (EXIT_PHRASES.some(p => lower.includes(p))) {
+        stopConversation();
+        addMsg('user', text);
+        speak("Goodbye! Say Hey Arya whenever you need me.").then(() => {
+          if (mode === 'voice') startWakeListen();
+        });
+        return;
+      }
+ 
+      // Normal command — send to backend
+      send(text, true);
+ 
+    } catch (err) {
+      console.warn('[Transcribe] failed:', err);
+      if (conversationActive && !isStreaming && !isSpeaking) {
+        setTimeout(() => startCommandListen(), 500);
+      }
+    }
+  };
+ 
+  mediaRecorder.start(100); // collect chunks every 100ms
+ 
+  // Hard timeout — stop even if no silence detected
+  silenceTimer = setTimeout(() => {
+    if (isRecording) stopCommandListen();
+  }, MAX_RECORD_MS);
+ 
+  // Start silence detection to auto-stop when user finishes speaking
+  startSilenceDetection(stream);
+ 
+  console.log('[Mic] Recording started');
+}
+ 
+function stopCommandListen() {
+  if (!isRecording && (!mediaRecorder || mediaRecorder.state === 'inactive')) return;
+  clearTimeout(silenceTimer);
+  isRecording = false;
+  if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+    try { mediaRecorder.stop(); } catch(e) {}
+  }
+  setCommandListening(false);
+}
+ 
+function initCommandRecog() {
+  // Pre-acquire mic so first command has no delay
+  getMicStream().then(s => {
+    if (s) console.log('[Mic] Pre-acquired, ready for commands');
+  });
+}
+ 
+function setCommandListening(on) {
+  isListening = on;
+  micBtn.classList.toggle('on', on);
+  micIcon.style.display  = on ? 'none'  : 'block';
+  stopIcon.style.display = on ? 'block' : 'none';
+  if (on) setOrb(1);
+  else if (!isStreaming && !isSpeaking) setOrb(conversationActive ? 1 : 0);
+}
+ 
+// ═══════════════════════════════════════════════════════════════
+// CONVERSATION — start / stop
+// ═══════════════════════════════════════════════════════════════
+function startConversation() {
+  conversationActive = true;
+  logActivity('Conversation', 'Active — listening for commands');
+  stateLabel.textContent = 'Listening...';
+  stateLabel.classList.add('show');
+  setOrb(1);
+  // Small delay so Porcupine can fully release its mic subscription
+  // MediaRecorder uses getUserMedia independently so needs minimal wait
+  setTimeout(() => {
+    if (conversationActive) startCommandListen();
+  }, 200);
+}
+ 
+function stopConversation() {
+  conversationActive = false;
+  stopCommandListen();
+  stopSpeaking();
+  setOrb(0);
+  stateLabel.textContent = '';
+  stateLabel.classList.remove('show');
+  transcript.textContent = '';
+}
+ 
+// Manual mic button:
+//   • While ARYA is speaking → interrupt TTS, start recording your command
+//   • While idle/listening  → toggle conversation on/off
+micBtn.addEventListener('click', () => {
+  if (isSpeaking) {
+    // INTERRUPT: kill TTS immediately, start listening for new command
+    stopSpeaking();
+    transcript.textContent = '';
+    if (conversationActive) {
+      // Small delay so the audio element fully stops before mic opens
+      setTimeout(() => startCommandListen(), 300);
+    }
+  } else if (conversationActive) {
+    stopConversation();
+    if (mode === 'voice') startWakeListen();
+  } else {
+    stopWakeListen();
+    startConversation();
+  }
+});
+ 
+// ═══════════════════════════════════════════════════════════════
+// SEND MESSAGE
+// ═══════════════════════════════════════════════════════════════
+async function send(text, fromVoice = false) {
+  if (!text.trim() || isStreaming) return;
+  isStreaming = true;
+  sendBtn.disabled = true;
+ 
+  addMsg('user', text);
+  if (!fromVoice) chatInput.value = '';
+  transcript.textContent = '';
+  transcript.classList.remove('final');
+ 
+  // ── Thinking state: set immediately, hold until first chunk ──
+  setOrb(2);
+  logActivity('Query', text);
+ 
+  // Show typing dots BEFORE response arrives
+  showTypingIndicator();
+ 
+  let responseBubble = null;
+  let fullText = '';
+ 
+  try {
+    const res = await fetch(`${API}/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: text, session_id: sessionId, user_id: 'arya_test_user' }),
+      signal: AbortSignal.timeout(120000)
+    });
+ 
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const ct = res.headers.get('content-type') || '';
+ 
+    if (ct.includes('text/event-stream') || ct.includes('text/plain')) {
+      const reader = res.body.getReader();
+      const dec = new TextDecoder();
+      let buf = '';
+      let firstChunk = true;
+ 
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        const lines = buf.split('\n\n');
+        buf = lines.pop();
+ 
+        for (const ln of lines) {
+          if (!ln.startsWith('data: ')) continue;
+          try {
+            const d = JSON.parse(ln.slice(6));
+            if (d.session_id) sessionId = d.session_id;
+ 
+            if (d.chunk) {
+              // First chunk received — remove typing indicator, create bubble
+              if (firstChunk) {
+                firstChunk = false;
+                removeTypingIndicator();
+                responseBubble = addMsg('assistant', '');
+                // Keep orb on thinking (state 2) until TTS actually starts
+              }
+              fullText += d.chunk;
+              responseBubble.textContent = fullText;
+              scrollToBottom();
+            }
+ 
+            if (d.activity) logActivity(d.activity.event || 'Step', d.activity.message || '');
+            if (d.done) break;
+          } catch(e) { /* skip malformed lines */ }
+        }
+      }
+ 
+    } else {
+      // JSON response
+      const data = await res.json();
+      if (data.session_id) sessionId = data.session_id;
+      removeTypingIndicator();
+      fullText = data.response || data.result || data.output || data.message || 'Done.';
+      responseBubble = addMsg('assistant', fullText);
+    }
+ 
+    logActivity('Complete', 'Response delivered');
+ 
+    // ── Fire TTS the instant text appears — no await ──
+    // speak() runs concurrently; its own finally{} restarts command
+    // listening once audio ends. Text and voice start at the same time.
+    if (fullText && fullText !== '...') {
+      speak(fullText).catch(e => console.warn('[TTS]', e));
+    }
+ 
+  } catch (err) {
+    removeTypingIndicator();
+    const errText = err.name === 'TimeoutError'
+      ? 'Request timed out. Please try again.'
+      : 'Something went wrong. Please try again.';
+    if (!responseBubble) responseBubble = addMsg('assistant', errText);
+    else responseBubble.textContent = errText;
+    logActivity('Error', err.message || err.toString());
+  } finally {
+    isStreaming = false;
+    sendBtn.disabled = !chatInput.value.trim();
+
+    if (mode === 'voice') {
+      if (!conversationActive) {
+        // Conversation was ended (exit phrase) — go back to wake word
+        startWakeListen();
+      } else if (!isSpeaking && (!fullText || fullText === '...')) {
+        // No TTS was fired (empty/skipped response) — restart listening now
+        setTimeout(() => startCommandListen(), 400);
+      }
+      // Normal case: speak() is running and will restart command listening
+      // via its own finally{} once audio ends
+    } else {
+      // Chat mode: return orb to idle (TTS may still be running — that's fine)
+      if (!isSpeaking) setOrb(0);
+    }
+  }
+}
+ 
+// Chat mode send
+sendBtn.addEventListener('click', () => send(chatInput.value));
+chatInput.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(chatInput.value); }
+});
+chatInput.addEventListener('input', () => {
+  sendBtn.disabled = !chatInput.value.trim();
+});
+ 
+// ═══════════════════════════════════════════════════════════════
+// FILE ATTACH
+// ═══════════════════════════════════════════════════════════════
+$('attach-voice').addEventListener('click', () => filePick.click());
+$('attach-chat').addEventListener('click',  () => filePick.click());
+filePick.addEventListener('change', e => {
+  const f = e.target.files[0];
+  if (f) logActivity('File attached', f.name);
+});
+ 
+// ═══════════════════════════════════════════════════════════════
+// HEALTH CHECK
+// ═══════════════════════════════════════════════════════════════
+async function health() {
+  try {
+    const r = await fetch(`${API}/health`, { signal: AbortSignal.timeout(4000) });
+    statusPip.classList.toggle('dead', !r.ok);
+  } catch { statusPip.classList.add('dead'); }
+}
+ 
+
+// ═══════════════════════════════════════════════════════════════
+// PROVIDER TOGGLE — switch between Sarvam and ElevenLabs
+// ═══════════════════════════════════════════════════════════════
+const providerToggle = $('provider-toggle');
+const providerDot    = $('provider-dot');
+const providerLabel  = $('provider-label');
+
+function updateProviderUI(isSwitch = false) {
+  // Show/hide voice selectors based on active provider
+  const sarvamWrap  = document.getElementById('voice-select-wrap');
+  const elevenWrap  = document.getElementById('eleven-voice-select-wrap');
+  if (sarvamWrap) sarvamWrap.classList.toggle('sarvam-active',  VOICE_PROVIDER === 'sarvam');
+  if (elevenWrap) elevenWrap.classList.toggle('eleven-active', VOICE_PROVIDER === 'elevenlabs');
+
+  const isSarvam = VOICE_PROVIDER === 'sarvam';
+  providerDot.className   = 'provider-dot ' + (isSarvam ? 'sarvam' : 'eleven');
+  providerDot.textContent = isSarvam ? 'SA' : 'EL';
+  providerLabel.textContent = isSarvam ? 'Sarvam' : 'ElevenLabs';
+  providerToggle.title = `Currently: ${isSarvam ? 'Sarvam AI' : 'ElevenLabs'} — click to switch`;
+  console.log('[Provider] Now using:', VOICE_PROVIDER);
+  if (isSwitch) logActivity('Provider', `Switched to ${isSarvam ? 'Sarvam AI' : 'ElevenLabs'}`);
+}
+
+providerToggle.addEventListener('click', () => {
+  VOICE_PROVIDER = VOICE_PROVIDER === 'sarvam' ? 'elevenlabs' : 'sarvam';
+  updateProviderUI(true);
+});
+
+// Wire voice selector
+const voiceSel = document.getElementById('voice-select');
+if (voiceSel) {
+  voiceSel.value = SARVAM_VOICE;
+  voiceSel.addEventListener('change', () => {
+    SARVAM_VOICE = voiceSel.value;
+    console.log('[Voice] Sarvam voice set to:', SARVAM_VOICE);
+    logActivity('Voice', 'Sarvam voice: ' + SARVAM_VOICE);
+  });
+}
+
+// Wire ElevenLabs voice selector
+const elevenVoiceSel = document.getElementById('eleven-voice-select');
+if (elevenVoiceSel) {
+  elevenVoiceSel.value = ELEVENLABS_VOICE;
+  elevenVoiceSel.addEventListener('change', () => {
+    ELEVENLABS_VOICE = elevenVoiceSel.value;
+    const name = elevenVoiceSel.options[elevenVoiceSel.selectedIndex].text;
+    console.log('[Voice] ElevenLabs voice set to:', name, ELEVENLABS_VOICE);
+    logActivity('Voice', 'ElevenLabs voice: ' + name);
+  });
+}
+
+// Set initial UI state
+updateProviderUI();
+
+// ═══════════════════════════════════════════════════════════════
+// INIT
+// ═══════════════════════════════════════════════════════════════
+window.addEventListener('resize', resizeCanvas);
+resizeCanvas();
+initGL();
+frame();
+health();
+setInterval(health, 20000);
+ 
+// Initialize command recognition (always needed)
+initCommandRecog();
+ 
+// Initialize Porcupine (async — starts wake listening when ready)
+initPorcupine().then(() => {
+  setOrb(0);
+  if (mode === 'voice') {
+    setTimeout(() => startWakeListen(), 600);
+  }
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,21 @@
+injection_taint_escalation: true
+approval_timeout_seconds: 120
+tools:
+  "*read*": {mode: auto}
+  "*search*": {mode: auto}
+  "spotify_*": {mode: auto}
+  open_app: {mode: auto}
+  close_app: {mode: auto}
+  set_volume: {mode: auto}
+  type_text: {mode: auto}
+  take_screenshot: {mode: auto}
+  browser_task: {mode: auto}
+  vscode_open*: {mode: auto}
+  vscode_search: {mode: auto}
+  vscode_format: {mode: auto}
+  whatsapp_send: {mode: ask}
+  whatsapp_voice_call: {mode: ask}
+  vscode_run_command: {mode: ask}
+  "*send*": {mode: ask}
+  "*reply*": {mode: ask}
+  "*delete*": {mode: ask}

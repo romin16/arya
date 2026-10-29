@@ -1,0 +1,9 @@
+main: gpt-4o
+aux: gpt-4o-mini
+embedding: text-embedding-3-small
+embedding_dimensions: 1536
+limits:
+  max_tool_rounds: 8
+  max_active_skills: 3
+  token_budget: 12000
+  tool_timeout_seconds: 30

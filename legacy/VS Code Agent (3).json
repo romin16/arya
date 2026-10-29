@@ -1,0 +1,266 @@
+{
+  "name": "VS Code Agent",
+  "nodes": [
+    {
+      "parameters": {
+        "inputSource": "passthrough"
+      },
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        -544,
+        416
+      ],
+      "id": "e5787333-e966-40e4-ae2c-809829b1845e",
+      "name": "When Executed by Another Workflow"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extract the user's request\nconst input = $input.first().json;\nconst userRequest = input.query || input.user_request || input.message || input.text || JSON.stringify(input);\n\nconsole.log('[VSCode] Raw input:', JSON.stringify(input));\nconsole.log('[VSCode] User request:', userRequest);\n\nconst request = userRequest.toLowerCase();\n\nlet action = 'open'; // Default\nlet folder = null;\nlet file = null;\nlet searchTerm = null;\nlet command = null;\n\n// Detect action type\nif (request.includes('search') || request.includes('find')) {\n  action = 'search';\n  // Extract search term\n  const searchMatch = userRequest.match(/(?:search|find)\\s+(?:for\\s+)?[\"']?([^\"']+)[\"']?/i);\n  if (searchMatch) {\n    searchTerm = searchMatch[1].trim();\n  }\n}\nelse if (request.includes('run') || request.includes('execute') || request.includes('terminal')) {\n  action = 'run_command';\n  // Extract command\n  const cmdMatch = userRequest.match(/(?:run|execute)\\s+[\"']?([^\"']+)[\"']?/i);\n  if (cmdMatch) {\n    command = cmdMatch[1].trim();\n  }\n}\nelse if (request.includes('open file') || request.includes('open') && (request.includes('.py') || request.includes('.js') || request.includes('.txt'))) {\n  action = 'open_file';\n  // Extract filename\n  const fileMatch = userRequest.match(/([a-zA-Z0-9_-]+\\.[a-z]{2,4})/i);\n  if (fileMatch) {\n    file = fileMatch[1];\n  }\n}\nelse if (request.includes('format')) {\n  action = 'format';\n}\nelse {\n  // Default: just open VS Code\n  action = 'open';\n  // Try to extract folder path\n  const folderMatch = userRequest.match(/([A-Z]:\\\\[^\\s]+|\\/?[a-z_-]+(?:\\/[a-z_-]+)*)/i);\n  if (folderMatch) {\n    folder = folderMatch[1];\n  }\n}\n\nconst result = { \n  action,\n  folder,\n  file,\n  searchTerm,\n  command\n};\n\nconsole.log('[VSCode] Parsed:', JSON.stringify(result));\n\nreturn result;"
+      },
+      "id": "0e0ce062-cd0f-47ba-974d-e7cc16cc4322",
+      "name": "Parse VS Code Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -320,
+        416
+      ]
+    },
+    {
+      "parameters": {
+        "dataType": "string",
+        "value1": "={{ $json.action }}",
+        "rules": {
+          "rules": [
+            {
+              "value2": "open"
+            },
+            {
+              "value2": "open_file",
+              "output": 1
+            },
+            {
+              "value2": "search",
+              "output": 2
+            },
+            {
+              "value2": "run_command",
+              "output": 3
+            },
+            {
+              "value2": "format",
+              "output": 3
+            }
+          ]
+        },
+        "fallbackOutput": 0
+      },
+      "id": "c54fb340-4bfe-4d02-9e7a-c54bac149c0f",
+      "name": "Route VS Code Action",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 1,
+      "position": [
+        -80,
+        416
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:5000/desktop/vscode/open",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ folder: $json.folder }) }}",
+        "options": {}
+      },
+      "id": "2bae7377-0f8b-48b6-b9ca-2beee833026f",
+      "name": "Open VS Code",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        192,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:5000/desktop/vscode/open_file",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ file: $json.file }) }}",
+        "options": {}
+      },
+      "id": "88415bd4-3cce-470f-ad17-7a8248df3bcb",
+      "name": "Open File",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        192,
+        256
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:5000/desktop/vscode/search",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ term: $json.searchTerm }) }}",
+        "options": {}
+      },
+      "id": "d5dcc9c2-7dbd-4c72-ae97-a58df3e8039e",
+      "name": "Search in Files",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        192,
+        416
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:5000/desktop/vscode/run_command",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ command: $json.command }) }}",
+        "options": {}
+      },
+      "id": "59b251f5-ead1-4bc5-b0d6-485f4cbae85c",
+      "name": "Run Terminal Command",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        192,
+        592
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Format the response for the main agent\nconst input = $input.first().json;\n\nlet response;\n\nif (input.success) {\n  response = input.message || 'VS Code action completed successfully';\n} else {\n  response = `VS Code error: ${input.error || 'Unknown error'}`;\n}\n\nconsole.log('[VSCode] Response:', response);\n\nreturn { result: response };"
+      },
+      "id": "ee0bf2dc-fabd-4b03-8edc-796ae89702f3",
+      "name": "Format Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        448,
+        416
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "When Executed by Another Workflow": {
+      "main": [
+        [
+          {
+            "node": "Parse VS Code Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse VS Code Request": {
+      "main": [
+        [
+          {
+            "node": "Route VS Code Action",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route VS Code Action": {
+      "main": [
+        [
+          {
+            "node": "Open VS Code",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Open File",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Search in Files",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Run Terminal Command",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Open VS Code": {
+      "main": [
+        [
+          {
+            "node": "Format Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Open File": {
+      "main": [
+        [
+          {
+            "node": "Format Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Search in Files": {
+      "main": [
+        [
+          {
+            "node": "Format Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run Terminal Command": {
+      "main": [
+        [
+          {
+            "node": "Format Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "availableInMCP": false
+  },
+  "versionId": "af944b3d-e7d0-48bd-909e-24fd04ea1780",
+  "meta": {
+    "instanceId": "92837384f8d184a48e0e9dc5b47da7373a29dfbb663666fd5bf5f39dfada8514"
+  },
+  "id": "NWeiSaSbgm9kznOu",
+  "tags": []
+}

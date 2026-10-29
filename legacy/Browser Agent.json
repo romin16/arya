@@ -1,0 +1,117 @@
+{
+  "name": "Browser Agent",
+  "nodes": [
+    {
+      "parameters": {
+        "workflowInputs": {
+          "values": [
+            {
+              "name": "query"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        960,
+        1856
+      ],
+      "id": "9e9d7c9a-2036-470a-b0cf-1ab07f814755",
+      "name": "When Executed by Another Workflow"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ═══════════════════════════════════════════════════════════════\n// BROWSER TASK BUILDER v2\n// ═══════════════════════════════════════════════════════════════\n\nconst input = $input.first().json;\nconst userRequest = String(input.query || input.user_request || input.message || input.text || JSON.stringify(input));\n\nconsole.log('[Browser] Raw input:', JSON.stringify(input));\nconsole.log('[Browser] User request:', userRequest);\n\nconst request = String(userRequest).toLowerCase();\nlet task = '';\n\n// ═══════════════════════════════════════════════════════════════\n// SHOPPING\n// ═══════════════════════════════════════════════════════════════\nif (request.includes('shop') || request.includes('buy') || request.includes('order') ||\n    request.includes('blinkit') || request.includes('swiggy') || request.includes('zepto') ||\n    request.includes('amazon') || request.includes('cart') || request.includes('flipkart')) {\n\n  // ── Product extraction ───────────────────────────────────────\n  // Stop at \"to cart\", \"to my cart\", \"from [store]\", \"on [store]\"\n  // NOT just \"to\" — that breaks \"500 grams of tomatoes TO cart\"\n  const stores = 'blinkit|amazon|zepto|swiggy|instamart|flipkart|myntra|meesho|bigbasket';\n  const stopPattern = new RegExp(\n    `\\\\s+(?:to\\\\s+(?:my\\\\s+)?(?:${stores})(?:\\\\s+cart)?|to\\\\s+(?:my\\\\s+)?cart|from\\\\s+(?:${stores})|on\\\\s+(?:${stores})|in\\\\s+(?:${stores}))`,\n    'i'\n  );\n\n  // Extract verb + everything after, then cut at stop pattern\n  const verbMatch = userRequest.match(\n    /(?:order|buy|get|find|shop\\s+for|add)\\s+(?:some\\s+)?(.+)/i\n  );\n\n  let product = userRequest; // fallback\n  if (verbMatch) {\n    product = verbMatch[1].replace(stopPattern, '').trim();\n  }\n\n  const encodedProduct = encodeURIComponent(product);\n\n  // ── Cart intent ──────────────────────────────────────────────\n  const wantsCart = request.includes('add') || request.includes('cart') ||\n                    request.includes('order') || request.includes('buy');\n  const cartInstruction = wantsCart\n    ? `Click on the first relevant result, then click \"Add to Cart\". Stop before checkout. Report the product name, price, and confirm it was added to cart.`\n    : `Find the first relevant result and report its name and price only. Do not add to cart.`;\n\n  // ── Route to store ───────────────────────────────────────────\n  if (request.includes('blinkit')) {\n    task = `Go to https://blinkit.com/s/?q=${encodedProduct} — direct search for \"${product}\" on Blinkit. Wait for products to load. Find the first relevant product, click ADD. Stop before checkout. Report what was added and its price.`;\n  } else if (request.includes('zepto')) {\n    task = `Go to https://www.zeptonow.com/search?query=${encodedProduct} — direct search for \"${product}\" on Zepto. Wait for results. Add the first item to cart. Stop before checkout. Report what was added and price.`;\n  } else if (request.includes('amazon')) {\n    task = `Go to https://www.amazon.in/s?k=${encodedProduct} — direct search for \"${product}\" on Amazon India. ${cartInstruction}`;\n  } else if (request.includes('swiggy') || request.includes('instamart')) {\n    task = `Go to https://www.swiggy.com/instamart/search?query=${encodedProduct} — direct search for \"${product}\" on Swiggy Instamart. Wait for results. ${cartInstruction}`;\n  } else if (request.includes('flipkart')) {\n    task = `Go to https://www.flipkart.com/search?q=${encodedProduct} — direct search for \"${product}\" on Flipkart. ${cartInstruction}`;\n  } else {\n    task = `${userRequest}. Stop before final checkout/payment. Confirm what was added to cart and its price.`;\n  }\n}\n\n// ═══════════════════════════════════════════════════════════════\n// SOCIAL MEDIA\n// ═══════════════════════════════════════════════════════════════\nelse if (request.includes('like') || request.includes('tweet') || request.includes('post') ||\n         request.includes('follow') || request.includes('x.com') || request.includes('twitter') ||\n         request.includes('instagram') || request.includes('linkedin')) {\n  task = `${userRequest}. Confirm the action was completed successfully and report what you did.`;\n}\n\n// ═══════════════════════════════════════════════════════════════\n// BOOKING\n// ═══════════════════════════════════════════════════════════════\nelse if (request.includes('book') || request.includes('reserve') || request.includes('restaurant') ||\n         request.includes('hotel') || request.includes('flight') || request.includes('ticket') ||\n         request.includes('zomato') || request.includes('makemytrip')) {\n  task = `${userRequest}. Stop before final payment. Confirm what was booked/selected.`;\n}\n\n// ═══════════════════════════════════════════════════════════════\n// YOUTUBE\n// ═══════════════════════════════════════════════════════════════\nelse if (request.includes('youtube') || (request.includes('video') && !request.includes('blinkit'))) {\n  let query = userRequest;\n  const onYt  = userRequest.match(/(?:play|search|find|watch)\\s+(.+?)\\s+(?:on\\s+youtube|on\\s+yt)/i);\n  const ytFor = userRequest.match(/youtube\\s+(?:for|on|about)?\\s*(.+)/i);\n  const playX = userRequest.match(/(?:play|search for|watch)\\s+(.+)/i);\n  if (onYt)  query = onYt[1].trim();\n  else if (ytFor && ytFor[1].trim()) query = ytFor[1].trim();\n  else if (playX) query = playX[1].replace(/on youtube|on yt/gi, '').trim();\n  task = `Go to https://www.youtube.com/results?search_query=${encodeURIComponent(query)} — direct YouTube search for \"${query}\". Wait for results. Click the first relevant video and start playing it. Report which video you opened.`;\n}\n\n// ═══════════════════════════════════════════════════════════════\n// GOOGLE SEARCH\n// ═══════════════════════════════════════════════════════════════\nelse if (request.includes('google') || request.includes('search') || request.includes('find') ||\n         request.includes('look up') || request.includes('research')) {\n  let query = userRequest;\n  const m = userRequest.match(/(?:google|search|find|look up|research)\\s+(?:for|about)?\\s*(.+)/i);\n  if (m) query = m[1].trim();\n  task = `Go to https://google.com, search for \"${query}\", read the top 3 results and summarize what you found.`;\n}\n\n// ═══════════════════════════════════════════════════════════════\n// OPEN URL\n// ═══════════════════════════════════════════════════════════════\nelse if (request.includes('go to') || request.includes('open') || request.includes('visit') ||\n         request.match(/[a-z0-9-]+\\.(com|org|net|io|dev)/i)) {\n  task = `${userRequest}. Wait for the page to fully load and report what you see.`;\n}\n\n// ═══════════════════════════════════════════════════════════════\n// DEFAULT\n// ═══════════════════════════════════════════════════════════════\nelse {\n  task = `${userRequest}. Report what you did and the result.`;\n}\n\nconsole.log('[Browser] Task built:', task);\nreturn { task, original_request: userRequest };\n\n/*\nFIX SUMMARY — product extraction:\n\nOLD (broken):\n  regex stops at any \"to\" → \"Add 500 grams of tomatoes TO cart\" → extracts \"500 grams of\"\n\nNEW (fixed):\n  regex stops only at \"to cart\", \"to my cart\", \"from blinkit\", \"on blinkit\" etc.\n  → \"Add 500 grams of tomatoes to cart on Blinkit\" → extracts \"500 grams of tomatoes\" ✅\n  → \"Add Razer mouse to cart on Amazon\" → extracts \"Razer mouse\" ✅\n  → \"Order milk from Blinkit\" → extracts \"milk\" ✅\n*/"
+      },
+      "id": "c7b1e629-bbf8-4f16-848a-40e72b431d58",
+      "name": "Build Task",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1184,
+        1856
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:8000/run-task",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ task: $json.task }) }}",
+        "options": {
+          "timeout": 180000
+        }
+      },
+      "id": "a581c806-e0ba-45a4-9bb2-2a5a93b392f0",
+      "name": "Run Browser Task",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1424,
+        1856
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Format the response back to main Arya agent\nconst input = $input.first().json;\n\nconsole.log('[Browser] Raw response:', JSON.stringify(input));\n\nlet response;\n\nif (input.success) {\n  response = input.result || 'Browser task completed successfully.';\n} else {\n  response = `Browser task failed: ${input.result || 'Unknown error'}`;\n}\n\nconsole.log('[Browser] Final response:', response);\n\nreturn { result: response };"
+      },
+      "id": "40592be6-97fe-4318-9f65-5f0cb1fa08ce",
+      "name": "Format Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1664,
+        1856
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "When Executed by Another Workflow": {
+      "main": [
+        [
+          {
+            "node": "Build Task",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Task": {
+      "main": [
+        [
+          {
+            "node": "Run Browser Task",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run Browser Task": {
+      "main": [
+        [
+          {
+            "node": "Format Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "availableInMCP": false
+  },
+  "versionId": "f16841b9-a7a4-4605-a3e5-5086dcea0a11",
+  "meta": {
+    "instanceId": "92837384f8d184a48e0e9dc5b47da7373a29dfbb663666fd5bf5f39dfada8514"
+  },
+  "id": "cPeNYI30RSTVT5Sh",
+  "tags": []
+}

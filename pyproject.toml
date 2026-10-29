@@ -1,0 +1,53 @@
+[project]
+name = "arya-v4"
+version = "0.1.0"
+description = "Local-first personal voice assistant"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi==0.115.12",
+  "uvicorn[standard]==0.34.2",
+  "pydantic-settings==2.9.1",
+  "PyYAML==6.0.2",
+  "cryptography==44.0.3",
+  "phonenumbers==9.0.5",
+  "psycopg[binary,pool]==3.2.9",
+  "pgvector==0.4.1",
+  "langgraph==0.4.8",
+  "langgraph-checkpoint-postgres==2.0.21",
+  "langchain-openai==0.3.18",
+  "langchain-mcp-adapters==0.1.4",
+  "mcp==1.9.4",
+  "httpx==0.28.1",
+  "python-multipart==0.0.20",
+  "apscheduler==3.11.0",
+  "python-dotenv>=1.2.4",
+]
+
+[build-system]
+requires = ["setuptools==80.9.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["core*", "device*", "voice*", "evals*"]
+
+[project.optional-dependencies]
+voice = ["elevenlabs==1.58.1", "sarvamai==0.1.11", "groq==0.26.0"]
+observability = ["langfuse==3.0.8", "logfire[fastapi,psycopg,httpx]==3.20.0"]
+device = ["pyautogui==0.9.54", "pygetwindow==0.0.9", "Pillow==11.2.1"]
+dev = ["pytest==8.3.5", "pytest-asyncio==0.26.0", "ruff==0.11.11"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+asyncio_default_fixture_loop_scope = "function"
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3.5",
+    "pytest-asyncio>=0.26.0",
+]

@@ -1,0 +1,15 @@
+- utterance: Pause Spotify
+  tool: spotify_pause
+- utterance: Resume Spotify
+  tool: spotify_resume
+- utterance: Play Daft Punk
+  tool: spotify_play
+- utterance: Open VS Code
+  tool: open_app
+- utterance: Send Neha a WhatsApp message saying I am late
+  tool: whatsapp_send
+  approval: required
+- utterance: What is the weather in Mumbai?
+  tool: get_weather
+- utterance: Search the web for pgvector
+  tool: web_search

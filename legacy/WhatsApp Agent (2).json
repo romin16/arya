@@ -1,0 +1,228 @@
+{
+  "name": "WhatsApp Agent",
+  "nodes": [
+    {
+      "parameters": {
+        "workflowInputs": {
+          "values": [
+            {
+              "name": "query"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        -256,
+        688
+      ],
+      "id": "0fbc3431-a8e9-4590-b514-f5a43998e024",
+      "name": "When Executed by Another Workflow"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ═══════════════════════════════════════════════════════════════\n// WHATSAPP PARSER v5 — case-insensitive contact extraction\n// Handles lowercase names from voice transcription\n// ═══════════════════════════════════════════════════════════════\n\nconst input = $input.first().json;\nconst userRequest = String(input.query || input.user_request || input.message || input.text || JSON.stringify(input));\n\nconsole.log('[WhatsApp] Raw input:', JSON.stringify(input));\nconsole.log('[WhatsApp] User request:', userRequest);\n\nconst request = userRequest.toLowerCase();\n\nlet action  = 'send_message';\nlet contact = '';\nlet message = '';\nlet match;\n\n// Common non-name words to exclude from contact extraction\nconst SKIP_WORDS = new Set([\n  'the','a','an','my','our','your','him','her','them','me','us','it',\n  'on','in','at','for','from','is','are','was','how','what','where',\n  'when','who','please','right','now','today','tonight','tomorrow',\n  'and','but','or','whatsapp','message','msg','send','text','tell',\n  'ask','hi','hey','any','new','last','recent','check','show','get',\n  'inbox','read','retrieve','retrive','saying','say','that','did','got'\n]);\n\nfunction cleanContact(name) {\n  if (!name) return '';\n  // Capitalize each word\n  return name.trim().split(/\\s+/)\n    .filter(w => w.length > 1 && !SKIP_WORDS.has(w.toLowerCase()))\n    .map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())\n    .join(' ');\n}\n\n// ── STEP 1: Detect action type ────────────────────────────────\n\nconst isReadRequest =\n  request.includes('read') ||\n  request.includes('retrive') ||\n  request.includes('retrieve') ||\n  request.includes('what message') ||\n  request.includes('what did') ||\n  request.includes('sent me') ||\n  request.includes('sended me') ||\n  request.includes('received') ||\n  request.includes('show me') ||\n  request.includes('check message') ||\n  request.includes('any message') ||\n  request.includes('new message') ||\n  request.includes('recent message') ||\n  request.includes('last message') ||\n  request.includes('inbox');\n\nconst isCallRequest =\n  request.includes('call') &&\n  !request.includes('saying') &&\n  !request.includes('say');\n\nif (isReadRequest && (request.includes('message') || request.includes('chat') || request.includes('whatsapp') || request.includes('inbox') || request.includes('retrive') || request.includes('retrieve'))) {\n  action = 'read_messages';\n} else if (isCallRequest) {\n  action = 'voice_call';\n}\n\n// ── STEP 2: Extract contact — case-insensitive patterns ───────\n// KEY FIX: removed [A-Z] uppercase requirement — works with lowercase voice input\n\n// Pattern A: \"to [NAME] saying\"\nmatch = userRequest.match(/\\bto\\s+((?:[A-Za-z]+\\s+){0,2}[A-Za-z]+)\\s+saying\\b/i);\nif (match) {\n  const c = cleanContact(match[1]);\n  if (c) { contact = c; console.log('[WhatsApp] Contact via A:', contact); }\n}\n\n// Pattern B: \"message/text/tell [NAME] saying\"\nif (!contact) {\n  match = userRequest.match(/\\b(?:message|text|tell|whatsapp)\\s+((?:[A-Za-z]+\\s+){0,2}[A-Za-z]+)\\s+saying\\b/i);\n  if (match) {\n    const c = cleanContact(match[1]);\n    if (c) { contact = c; console.log('[WhatsApp] Contact via B:', contact); }\n  }\n}\n\n// Pattern C: \"to [name]\" — stops before common verbs/prepositions\nif (!contact) {\n  match = userRequest.match(/\\bto\\s+([A-Za-z]+(?:\\s+[A-Za-z]+){0,1})(?:\\s+(?:saying|on|in|via|about|that|the)|$)/i);\n  if (match) {\n    const c = cleanContact(match[1]);\n    if (c) { contact = c; console.log('[WhatsApp] Contact via C:', contact); }\n  }\n}\n\n// Pattern D: \"send/text/tell [name]\"\nif (!contact) {\n  match = userRequest.match(/\\b(?:send|text|tell|whatsapp)\\s+([A-Za-z]+(?:\\s+[A-Za-z]+){0,1})(?:\\s|$)/i);\n  if (match) {\n    const c = cleanContact(match[1]);\n    if (c) { contact = c; console.log('[WhatsApp] Contact via D:', contact); }\n  }\n}\n\n// Pattern E: \"Hey/Hi [name],\" — pre-composed message\nif (!contact) {\n  match = userRequest.match(/^(?:hey|hi|hello|dear|yo)\\s+([A-Za-z]+(?:\\s+[A-Za-z]+){0,1})[,!\\s]/i);\n  if (match) {\n    const c = cleanContact(match[1]);\n    if (c) {\n      contact = c;\n      message = userRequest;\n      console.log('[WhatsApp] Contact via E:', contact);\n    }\n  }\n}\n\n// Pattern F: \"Ask/Tell/Remind [name] [message]\"\nif (!contact) {\n  match = userRequest.match(/^(?:ask|tell|inform|notify|remind)\\s+([A-Za-z]+(?:\\s+[A-Za-z]+){0,1})\\s+(.+)/i);\n  if (match) {\n    const c = cleanContact(match[1]);\n    if (c) {\n      contact = c;\n      message = match[2].trim();\n      console.log('[WhatsApp] Contact via F:', contact);\n    }\n  }\n}\n\n// Pattern G: read requests — \"from [name]\", \"[name] sent\", \"message from [name]\"\nif (!contact && action === 'read_messages') {\n  match = userRequest.match(/\\bfrom\\s+([A-Za-z]+(?:\\s+[A-Za-z]+){0,1})/i);\n  if (!match) match = userRequest.match(/\\b([A-Za-z]+)\\s+(?:sent|sended|send)/i);\n  if (!match) match = userRequest.match(/\\bby\\s+([A-Za-z]+)/i);\n  if (!match) {\n    // \"check neel messages\", \"neel whatsapp\" — name before keyword\n    match = userRequest.match(/\\b([A-Za-z]+)\\s+(?:message|whatsapp|chat)/i);\n  }\n  if (match) {\n    const c = cleanContact(match[1]);\n    if (c) { contact = c; console.log('[WhatsApp] Contact via G:', contact); }\n  }\n}\n\n// ── STEP 3: Message extraction (skip if set by E or F) ────────\n\nif (!message) {\n  match = userRequest.match(/\\bsaying\\s+(.+)$/i);\n  if (match) { message = match[1].trim(); }\n\n  if (!message) {\n    match = userRequest.match(/\\bsay\\s+(.+)$/i);\n    if (match) { message = match[1].trim(); }\n  }\n\n  if (!message) {\n    match = userRequest.match(/\\bthat\\s+(.+)$/i);\n    if (match) { message = match[1].trim(); }\n  }\n\n  if (!message && contact) {\n    const escaped = contact.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&');\n    const after = userRequest\n      .replace(new RegExp(`.*?\\\\b${escaped}\\\\b`, 'i'), '')\n      .replace(/^\\s*(saying|say|that|to|message|,|-)\\s*/i, '')\n      .trim();\n    if (after.length > 1) { message = after; }\n  }\n\n  if (!message) { message = userRequest; }\n}\n\n// ── OUTPUT ────────────────────────────────────────────────────\n\nconst result = {\n  action,\n  contact: contact || 'Unknown',\n  message: message || userRequest\n};\n\nconsole.log('[WhatsApp] ✅ Final:', JSON.stringify(result));\nreturn result;"
+      },
+      "id": "5d1b67f6-36ca-4e1b-9e09-1c13c9e6e87e",
+      "name": "Parse WhatsApp Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -32,
+        688
+      ]
+    },
+    {
+      "parameters": {
+        "dataType": "string",
+        "value1": "={{ $json.action }}",
+        "rules": {
+          "rules": [
+            {
+              "value2": "send_message"
+            },
+            {
+              "value2": "read_messages",
+              "output": 1
+            },
+            {
+              "value2": "voice_call",
+              "output": 2
+            }
+          ]
+        },
+        "fallbackOutput": 0
+      },
+      "id": "be5dc2c7-f6e1-4a89-a5de-2b5e7d40d238",
+      "name": "Route WhatsApp Action",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 1,
+      "position": [
+        208,
+        688
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:5000/desktop/whatsapp/send_message",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ contact: $json.contact, message: $json.message }) }}",
+        "options": {}
+      },
+      "id": "bf33e6e7-8dde-4d50-bc26-cf33c492f335",
+      "name": "Send WhatsApp Message",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        480,
+        496
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:5000/desktop/whatsapp/read_messages",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ num_messages: 5, contact: $json.contact }) }}",
+        "options": {}
+      },
+      "id": "20c3f89c-8dc8-480d-adf6-cbf32696893c",
+      "name": "Read WhatsApp Messages",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        480,
+        688
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:5000/desktop/whatsapp/voice_call",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={}",
+        "options": {}
+      },
+      "id": "d4d94712-71f9-4701-846c-c56832f3de06",
+      "name": "WhatsApp Voice Call",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        496,
+        896
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const input = $input.first().json;\n\nlet response;\n\nif (input.success) {\n  // For read_messages, format the messages nicely\n  if (input.messages && Array.isArray(input.messages) && input.messages.length > 0) {\n    const formatted = input.messages.map((m, i) => `${i+1}. ${m}`).join('\\n');\n    response = `Recent messages:\\n${formatted}`;\n  } else {\n    response = input.message || 'WhatsApp action completed successfully';\n  }\n} else {\n  response = `WhatsApp error: ${input.error || 'Unknown error'}`;\n}\n\nconsole.log('[WhatsApp] Response:', response);\nreturn { result: response };"
+      },
+      "id": "5f69dc31-94d5-4355-9510-6f1fd9d8c2f9",
+      "name": "Format Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        736,
+        688
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "When Executed by Another Workflow": {
+      "main": [
+        [
+          {
+            "node": "Parse WhatsApp Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse WhatsApp Request": {
+      "main": [
+        [
+          {
+            "node": "Route WhatsApp Action",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route WhatsApp Action": {
+      "main": [
+        [
+          {
+            "node": "Send WhatsApp Message",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Read WhatsApp Messages",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "WhatsApp Voice Call",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send WhatsApp Message": {
+      "main": [
+        [
+          {
+            "node": "Format Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read WhatsApp Messages": {
+      "main": [
+        [
+          {
+            "node": "Format Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "WhatsApp Voice Call": {
+      "main": [
+        [
+          {
+            "node": "Format Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "availableInMCP": false
+  },
+  "versionId": "a335ca9d-4ad9-4393-a23c-50414e9d5ab6",
+  "meta": {
+    "instanceId": "92837384f8d184a48e0e9dc5b47da7373a29dfbb663666fd5bf5f39dfada8514"
+  },
+  "id": "bgltkn8f2Be6pkjk",
+  "tags": []
+}
