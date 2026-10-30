@@ -28,12 +28,18 @@ from psycopg_pool import AsyncConnectionPool
 from pydantic import BaseModel, Field
 
 from core.graph.action_logger import latest_action_entries, persist_action_entries
+from core.mcp_adapters.google_workspace import GOOGLE_TOOL_SOURCES, adapt_google_tools
+from core.mcp_adapters.tools import MCPToolAdapter, ToolRefused
 from core.pii.egress import guard_payload
 from core.pii.vault import PIIVault, StreamingDetokenizer
 from core.skills_runtime import SkillsRuntime
+from core.tools.native import build_native_tools
+from core.tools.search import SearchService
+from core.tools.weather import WeatherService
 
 ROOT = Path(__file__).resolve().parents[2]
 DEVICE_MCP_URL = "http://127.0.0.1:5002/mcp/"
+GOOGLE_MCP_URL = "http://127.0.0.1:5003/mcp"
 DEVICE_TOOL_NAMES = {
     "spotify_play", "spotify_pause", "spotify_resume", "spotify_next", "spotify_previous",
     "open_app", "close_app", "set_volume", "type_text", "take_screenshot", "lock_screen",
@@ -76,6 +82,16 @@ def device_mcp_connection(device_token: str) -> dict[str, Any]:
         "transport": "streamable_http",
         "url": DEVICE_MCP_URL,
         "headers": {"Authorization": f"Bearer {device_token}"},
+    }
+
+
+def google_mcp_connection(token: str, url: str = GOOGLE_MCP_URL) -> dict[str, Any]:
+    if not token:
+        raise RuntimeError("GOOGLE_MCP_TOKEN is required")
+    return {
+        "transport": "streamable_http",
+        "url": url,
+        "headers": {"Authorization": f"Bearer {token}"},
     }
 
 
@@ -167,7 +183,11 @@ class CoreGraphRuntime:
         self.pool: AsyncConnectionPool | None = None
         self.saver: AsyncPostgresSaver | None = None
         self.mcp_client: MultiServerMCPClient | None = None
+        self.google_mcp_client: MultiServerMCPClient | None = None
         self.device_tools: dict[str, Any] = {}
+        self.tools: dict[str, Any] = {}
+        self.search_client: httpx.AsyncClient | None = None
+        self.weather_client: httpx.AsyncClient | None = None
         self.skills = SkillsRuntime(ROOT / "skills")
         self.vault: PIIVault | None = None
         self.http_client: httpx.AsyncClient | None = None
@@ -182,11 +202,14 @@ class CoreGraphRuntime:
         load_dotenv(ROOT / ".env")
         database_url = os.getenv("DATABASE_URL", "")
         token = os.getenv("DEVICE_TOKEN", "")
+        google_token = os.getenv("GOOGLE_MCP_TOKEN", "")
         api_key = os.getenv("OPENAI_API_KEY", "")
         if not database_url:
             raise RuntimeError("DATABASE_URL is required")
         if not api_key:
             raise RuntimeError("OPENAI_API_KEY is required")
+        if not google_token:
+            raise RuntimeError("GOOGLE_MCP_TOKEN is required")
 
         model_settings = yaml.safe_load((ROOT / "config" / "models.yaml").read_text(encoding="utf-8"))
         self.limits = model_settings["limits"]
@@ -208,17 +231,58 @@ class CoreGraphRuntime:
         self.saver = AsyncPostgresSaver(self.pool)
         await self.saver.setup()
 
-        self.mcp_client = MultiServerMCPClient({"device": device_mcp_connection(token)})
-        tools = await self.mcp_client.get_tools(server_name="device")
-        self.device_tools = {tool.name: tool for tool in tools}
+        mcp_config = yaml.safe_load((ROOT / "config" / "mcp_servers.yaml").read_text(encoding="utf-8"))
+        device_config = mcp_config["servers"]["arya_device"]
+        google_config = mcp_config["servers"]["google_workspace"]
+        device_connection = device_mcp_connection(token)
+        google_port = os.getenv("GOOGLE_MCP_PORT")
+        default_google_url = f"http://127.0.0.1:{google_port}/mcp" if google_port else google_config["url"]
+        google_connection = google_mcp_connection(
+            google_token,
+            os.getenv("GOOGLE_MCP_URL", default_google_url),
+        )
+        self.mcp_client = MultiServerMCPClient({"device": device_connection})
+        raw_device_tools = await self.mcp_client.get_tools(server_name="device")
+        self.device_tools = {
+            tool.name: MCPToolAdapter(
+                public_name=tool.name,
+                source_tool=tool,
+                description=tool.description or tool.name,
+                timeout_seconds=float(self.limits.get("tool_timeout_seconds", 30)),
+                retries=1,
+            ).as_langchain_tool()
+            for tool in raw_device_tools
+        }
         missing = DEVICE_TOOL_NAMES - self.device_tools.keys()
         if missing:
             raise RuntimeError(f"The device MCP server is missing tools: {', '.join(sorted(missing))}")
+
+        self.google_mcp_client = MultiServerMCPClient({"google_workspace": google_connection})
+        raw_google_tools = await self.google_mcp_client.get_tools(server_name="google_workspace")
+        raw_google_by_name = {tool.name: tool for tool in raw_google_tools}
+        missing_google = set(GOOGLE_TOOL_SOURCES.values()) - raw_google_by_name.keys()
+        if missing_google:
+            raise RuntimeError(
+                "The pinned Google Workspace MCP server is missing tools: "
+                + ", ".join(sorted(missing_google))
+            )
+        google_tools = adapt_google_tools(
+            raw_google_tools,
+            timeout_seconds=float(self.limits.get("tool_timeout_seconds", 30)),
+            retries=1,
+        )
 
         self.http_client = httpx.AsyncClient(
             timeout=60,
             event_hooks={"request": [_scan_openai_payload(self.vault)]},
         )
+        self.search_client = httpx.AsyncClient(timeout=httpx.Timeout(15, connect=5))
+        self.weather_client = httpx.AsyncClient(timeout=httpx.Timeout(15, connect=5))
+        native_tools = build_native_tools(
+            SearchService(self.search_client),
+            WeatherService(self.weather_client),
+        )
+        self.tools = {**self.device_tools, **google_tools, **native_tools}
         self.main_model = ChatOpenAI(
             model=model_settings["main"],
             api_key=api_key,
@@ -247,6 +311,11 @@ class CoreGraphRuntime:
         if self.pool is not None:
             await self.pool.close()
             self.pool = None
+        for client_name in ("search_client", "weather_client"):
+            client = getattr(self, client_name)
+            if client is not None:
+                await client.aclose()
+                setattr(self, client_name, None)
 
     async def _load_skill_tool(self, name: str) -> str:
         body, _ = self.skills.load(name, [])
@@ -303,8 +372,13 @@ class CoreGraphRuntime:
             writer = get_stream_writer()
             assert self.load_skill_tool is not None
             selected_names = self.skills.tool_names(state.get("active_skills", []))
-            selected_tools = [self.device_tools[name] for name in sorted(selected_names) if name in self.device_tools]
-            model = self.main_model.bind_tools([self.load_skill_tool, *selected_tools])
+            selected_tools = [self.tools[name] for name in sorted(selected_names) if name in self.tools]
+            always_tools = [
+                self.tools[name]
+                for name in ("web_search", "get_weather", "calculator")
+                if name in self.tools
+            ]
+            model = self.main_model.bind_tools([self.load_skill_tool, *always_tools, *selected_tools])
             skill_context = self.skills.context(state.get("active_skills", []))
             last_action = state.get("last_action")
             system_text = (
@@ -367,14 +441,24 @@ class CoreGraphRuntime:
                         body, active_skills = self.skills.load(args["name"], active_skills)
                         result: Any = body
                     else:
-                        tool = self.device_tools.get(name)
+                        tool = self.tools.get(name) or self.device_tools.get(name)
                         if tool is None or name not in self.skills.tool_names(active_skills):
-                            raise ValueError("tool is unavailable for the active skills")
+                            if name not in {"web_search", "get_weather", "calculator"}:
+                                raise ValueError("tool is unavailable for the active skills")
                         result = await asyncio.wait_for(tool.ainvoke(args), timeout=timeout)
                     content = _tool_content(result, self.vault)
+                except ToolRefused as exc:
+                    status = "error"
+                    content = str(exc)
                 except Exception as exc:
                     status = "error"
-                    content = "unknown token" if "unknown token" in str(exc) else "tool execution failed"
+                    message = str(exc)
+                    if "unknown token" in message:
+                        content = "unknown token"
+                    elif "Google MCP tool " in message or "Google CSE" in message or "Tavily" in message or "Brave Search" in message or "location" in message or "expression" in message or "calculate" in message:
+                        content = message
+                    else:
+                        content = "tool execution failed"
                 result_message = ToolMessage(
                     content=content,
                     name=name,

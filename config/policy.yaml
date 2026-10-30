@@ -19,3 +19,8 @@ tools:
   "*send*": {mode: ask}
   "*reply*": {mode: ask}
   "*delete*": {mode: ask}
+  gmail_send: {mode: ask}
+  gmail_reply: {mode: ask}
+  gmail_delete: {mode: ask}
+  calendar_delete: {mode: ask}
+  contacts_delete: {mode: ask}
