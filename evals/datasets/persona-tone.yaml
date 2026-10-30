@@ -1,0 +1,6 @@
+- utterance: Pause Spotify.
+  expected_tone: concise, dry, task-first
+- utterance: What's the weather tomorrow?
+  expected_tone: concise, human, lightly opinionated
+- utterance: Message John that the meeting moved to 3.
+  expected_tone: task-first with at most one relevant follow-up
