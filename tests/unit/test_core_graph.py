@@ -11,6 +11,7 @@ from langchain_core.messages import AIMessageChunk, HumanMessage, ToolMessage
 from langchain_core.tools import StructuredTool
 from langgraph.checkpoint.memory import MemorySaver
 
+import core.graph.runtime as runtime_module
 from core.app import app
 from core.graph.runtime import (
     FIXED_RULES,
@@ -19,6 +20,7 @@ from core.graph.runtime import (
     _scan_openai_payload,
     device_mcp_connection,
 )
+from core.mcp_adapters.google_workspace import GOOGLE_REQUIRED_SOURCES
 from core.pii.vault import PIIVault
 from core.skills_runtime import SkillsRuntime
 
@@ -214,3 +216,86 @@ async def test_custom_graph_tokenises_tool_results_logs_actions_and_detokenises_
     logged_args = pool.rows[0][1][3].obj
     assert raw_email not in json.dumps(logged_args)
     assert "[EMAIL_" in json.dumps(logged_args)
+
+
+def test_required_google_sources_match_installed_server_surface():
+    assert GOOGLE_REQUIRED_SOURCES == {
+        "list_accounts", "search_email", "read_email", "read_thread", "draft_email", "send_email",
+        "list_labels", "modify_labels", "list_attachments", "batch_list_attachments",
+        "download_attachment", "extract_attachment_text", "render_attachment_page", "archive_email",
+        "mark_read", "mark_unread", "list_calendars", "list_events", "get_event", "create_event",
+        "update_event", "delete_event", "quick_add_event", "move_event", "respond_to_event",
+        "list_instances", "free_busy", "create_calendar", "update_calendar", "delete_calendar",
+        "search_contacts", "list_contacts", "get_contact", "create_contact", "update_contact",
+        "delete_contact", "save_other_contact",
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("missing_required", [False, True])
+async def test_runtime_start_checks_google_tools_with_mocked_servers(monkeypatch, missing_required):
+    class StartupPool:
+        def __init__(self, **kwargs):
+            pass
+
+        async def open(self, wait=True):
+            return None
+
+        async def close(self):
+            return None
+
+    class StartupSaver(MemorySaver):
+        def __init__(self, pool):
+            super().__init__()
+
+        async def setup(self):
+            return None
+
+    class StartupModel:
+        def with_structured_output(self, schema):
+            return self
+
+    class StartupMCPClient:
+        def __init__(self, servers):
+            self.server = next(iter(servers))
+
+        async def get_tools(self, server_name):
+            names = set(runtime_module.DEVICE_TOOL_NAMES) if self.server == "device" else set(GOOGLE_REQUIRED_SOURCES)
+            if self.server == "google_workspace":
+                names.update({"drive_upload", "list_tasks"})
+            if missing_required and self.server == "google_workspace":
+                names.remove("search_email")
+            output = []
+            for name in sorted(names):
+                async def invoke(query: str = ""):
+                    return {"success": True}
+
+                output.append(StructuredTool.from_function(
+                    coroutine=invoke,
+                    name=name,
+                    description=f"Mock {name}",
+                ))
+            return output
+
+    monkeypatch.setenv("DATABASE_URL", "postgresql://mock/test")
+    monkeypatch.setenv("DEVICE_TOKEN", "device-test-token")
+    monkeypatch.setenv("GOOGLE_MCP_TOKEN", "google-test-token")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-test-key")
+    monkeypatch.setattr(runtime_module, "_load_vault", lambda _: PIIVault(b"test-secret", Fernet.generate_key()))
+    monkeypatch.setattr(runtime_module, "AsyncConnectionPool", StartupPool)
+    monkeypatch.setattr(runtime_module, "AsyncPostgresSaver", StartupSaver)
+    monkeypatch.setattr(runtime_module, "MultiServerMCPClient", StartupMCPClient)
+    monkeypatch.setattr(runtime_module, "ChatOpenAI", lambda **kwargs: StartupModel())
+
+    runtime = CoreGraphRuntime()
+    if missing_required:
+        with pytest.raises(RuntimeError, match="Google Workspace MCP server is missing tools: search_email"):
+            await runtime.start()
+        await runtime.close()
+        return
+
+    await runtime.start()
+    assert runtime.graph is not None
+    assert "gmail_search" in runtime.tools
+    assert not any("drive" in name or "task" in name for name in runtime.tools)
+    await runtime.close()

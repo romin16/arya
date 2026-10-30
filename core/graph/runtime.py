@@ -28,7 +28,11 @@ from psycopg_pool import AsyncConnectionPool
 from pydantic import BaseModel, Field
 
 from core.graph.action_logger import latest_action_entries, persist_action_entries
-from core.mcp_adapters.google_workspace import GOOGLE_TOOL_SOURCES, adapt_google_tools
+from core.mcp_adapters.google_workspace import (
+    GOOGLE_REQUIRED_SOURCES,
+    GOOGLE_TOOL_SOURCES,
+    adapt_google_tools,
+)
 from core.mcp_adapters.tools import MCPToolAdapter, ToolRefused
 from core.pii.egress import guard_payload
 from core.pii.vault import PIIVault, StreamingDetokenizer
