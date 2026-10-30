@@ -5,6 +5,7 @@ import httpx
 import pytest
 
 from voice.app import VoiceProviders, app, configured_elevenlabs_voice
+from voice.stt_filter import AudioMetrics, is_known_hallucination, load_stt_settings
 
 
 @pytest.fixture
@@ -108,3 +109,33 @@ def test_configured_voice_id_uses_environment_or_legacy_name_mapping(monkeypatch
     assert configured_elevenlabs_voice() == "lcMyyd2HUfFzxdCaC4Ta"
     monkeypatch.setenv("ELEVENLABS_VOICE_ID", "explicit-voice-id")
     assert configured_elevenlabs_voice() == "explicit-voice-id"
+
+
+def test_stt_hallucination_filter_requires_known_phrase_and_short_or_quiet_recording():
+    settings = load_stt_settings()
+    assert is_known_hallucination("Thanks for watching.", AudioMetrics(0.8, 0.04), settings)
+    assert is_known_hallucination("you", AudioMetrics(4.0, 0.002), settings)
+    assert not is_known_hallucination("you", AudioMetrics(4.0, 0.04), settings)
+    assert not is_known_hallucination("real command", AudioMetrics(0.4, 0.001), settings)
+
+
+@pytest.mark.asyncio
+async def test_transcribe_returns_empty_for_mocked_short_clip_hallucination(
+    monkeypatch, voice_api_client
+):
+    monkeypatch.setenv("GROQ_API_KEY", "test-groq-key")
+
+    async def handler(request: httpx.Request):
+        assert b"whisper-large-v3" in request.content
+        return httpx.Response(200, json={"text": "Thank you."})
+
+    provider_http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    app.state.providers = VoiceProviders(provider_http)
+    monkeypatch.setattr("voice.app.measure_audio", lambda *args: AudioMetrics(0.5, 0.03))
+    response = await voice_api_client.post(
+        "/transcribe", files={"audio": ("quiet.webm", b"mock-audio", "audio/webm")}
+    )
+    await provider_http.aclose()
+
+    assert response.status_code == 200
+    assert response.json() == {"success": True, "text": ""}

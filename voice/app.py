@@ -17,9 +17,11 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from voice.pii_mask import mask_for_tts
+from voice.stt_filter import is_known_hallucination, load_stt_settings, measure_audio
 
 ROOT = Path(__file__).resolve().parents[1]
 load_dotenv(ROOT / ".env")
+STT_SETTINGS = load_stt_settings()
 logger = logging.getLogger("arya.voice")
 ELEVENLABS_VOICES = {
     "Rachel": "21m00Tcm4TlvDq8ikWAM",
@@ -199,6 +201,14 @@ async def transcribe(audio: UploadFile = File(...)):
         text = await _providers().groq_transcribe(
             audio.filename or "audio.wav", audio.content_type or "audio/wav", content
         )
+        metrics = await asyncio.to_thread(
+            measure_audio,
+            content,
+            audio.content_type or "audio/wav",
+            str(STT_SETTINGS.get("ffmpeg_path", "ffmpeg")),
+        )
+        if is_known_hallucination(text, metrics, STT_SETTINGS):
+            text = ""
         return {"success": True, "text": text}
     except httpx.HTTPStatusError as exc:
         logger.warning("Groq returned HTTP %s", exc.response.status_code)

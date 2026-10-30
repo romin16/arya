@@ -1,0 +1,8 @@
+stt:
+  hallucination_phrases:
+    - "thank you"
+    - "thanks for watching"
+    - "you"
+  short_duration_seconds: 1.25
+  quiet_rms_fraction: 0.008
+  ffmpeg_path: ffmpeg
