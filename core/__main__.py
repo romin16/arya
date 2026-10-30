@@ -4,6 +4,11 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
 
 def main() -> None:
