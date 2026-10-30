@@ -39,7 +39,7 @@ from core.tools.weather import WeatherService
 
 ROOT = Path(__file__).resolve().parents[2]
 DEVICE_MCP_URL = "http://127.0.0.1:5002/mcp/"
-GOOGLE_MCP_URL = "http://127.0.0.1:5003/mcp"
+GOOGLE_MCP_URL = "http://127.0.0.1:8321/mcp"
 DEVICE_TOOL_NAMES = {
     "spotify_play", "spotify_pause", "spotify_resume", "spotify_next", "spotify_previous",
     "open_app", "close_app", "set_volume", "type_text", "take_screenshot", "lock_screen",
@@ -235,11 +235,9 @@ class CoreGraphRuntime:
         device_config = mcp_config["servers"]["arya_device"]
         google_config = mcp_config["servers"]["google_workspace"]
         device_connection = device_mcp_connection(token)
-        google_port = os.getenv("GOOGLE_MCP_PORT")
-        default_google_url = f"http://127.0.0.1:{google_port}/mcp" if google_port else google_config["url"]
         google_connection = google_mcp_connection(
             google_token,
-            os.getenv("GOOGLE_MCP_URL", default_google_url),
+            os.getenv("GOOGLE_MCP_URL", google_config["url"]),
         )
         self.mcp_client = MultiServerMCPClient({"device": device_connection})
         raw_device_tools = await self.mcp_client.get_tools(server_name="device")
@@ -260,7 +258,7 @@ class CoreGraphRuntime:
         self.google_mcp_client = MultiServerMCPClient({"google_workspace": google_connection})
         raw_google_tools = await self.google_mcp_client.get_tools(server_name="google_workspace")
         raw_google_by_name = {tool.name: tool for tool in raw_google_tools}
-        missing_google = set(GOOGLE_TOOL_SOURCES.values()) - raw_google_by_name.keys()
+        missing_google = GOOGLE_REQUIRED_SOURCES - raw_google_by_name.keys()
         if missing_google:
             raise RuntimeError(
                 "The pinned Google Workspace MCP server is missing tools: "

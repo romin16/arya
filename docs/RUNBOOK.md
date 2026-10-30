@@ -11,7 +11,7 @@
    .\scripts\setup_google_mcp.ps1 -Account you@example.com
    ```
 
-   The script checks out the pinned `google-accounts-mcp` commit under `%LOCALAPPDATA%\Arya`, applies the loopback bind patch, syncs its locked dependencies, then opens Google's consent page. Sign in and grant Gmail, Calendar, and Contacts access. The refresh token database stays under `%LOCALAPPDATA%\Arya\google-accounts`.
+   The script checks out the pinned `google-accounts-mcp` commit under `%LOCALAPPDATA%\Arya`, applies the loopback bind patch, syncs its locked dependencies, and stores data under `%LOCALAPPDATA%\Arya\google-mcp-data`. It checks `tokens.db` for the requested account and skips OAuth if that account is already authorized. Otherwise it opens Google's consent page. Sign in and grant access.
 
 5. Start the four local processes:
 
@@ -19,7 +19,7 @@
    .\deploy\start_all.ps1
    ```
 
-   The launcher starts device, voice, Google Workspace MCP, then core. It checks each health endpoint, including a bearer-authenticated MCP initialize request. Press Ctrl+C in the launcher window to stop them.
+   The launcher maps project OAuth and account values to `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, and `DEFAULT_ACCOUNT`, and maps `GOOGLE_MCP_TOKEN` to `MCP_BEARER_TOKEN`. It starts the documented `uv run google-accounts-mcp` command on port 8321, bound to `127.0.0.1`; core connects to `http://127.0.0.1:8321/mcp`. Health checks include a bearer-authenticated MCP initialize request. Press Ctrl+C in the launcher window to stop them.
 
 ## Search provider
 
@@ -31,7 +31,7 @@ Weather uses Open-Meteo geocoding and forecast APIs. If a request lacks a locati
 
 ## Approval boundary
 
-Policy marks Gmail send/reply/trash, Calendar delete, and Contact delete as `ask`. The Phase 6 approval graph is not implemented yet, so those adapters refuse the call with a clear message and do not contact Google. Draft creation and non-destructive reads/updates remain available according to `config/policy.yaml`.
+Policy marks Gmail send/reply/trash, Calendar delete, and Contact delete as `ask`. The Phase 6 approval graph is not implemented yet, so those adapters refuse the call with a clear message and do not contact Google. Draft creation and non-destructive reads/updates remain available according to `config/policy.yaml`. Only Gmail, Calendar, and Contacts tools are exposed to the agent; upstream Drive, shared-file, and Tasks tools are filtered out.
 
 ## Manual checks
 

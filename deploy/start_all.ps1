@@ -23,16 +23,17 @@ foreach ($Line in Get-Content $EnvFile) {
 $DevicePort = if ($env:ARYA_DEVICE_PORT) { $env:ARYA_DEVICE_PORT } else { '5002' }
 $VoicePort = if ($env:ARYA_VOICE_PORT) { $env:ARYA_VOICE_PORT } else { '5001' }
 $CorePort = if ($env:ARYA_CORE_PORT) { $env:ARYA_CORE_PORT } else { '5000' }
-$GoogleMcpPort = if ($env:GOOGLE_MCP_PORT) { $env:GOOGLE_MCP_PORT } else { '5003' }
+$GoogleMcpPort = '8321'
 if (-not $env:DEVICE_TOKEN) { throw 'DEVICE_TOKEN is required in .env for the authenticated device health check.' }
 if (-not $env:GOOGLE_MCP_TOKEN) { throw 'GOOGLE_MCP_TOKEN is required in .env for the authenticated Google MCP server.' }
 $Processes = @()
 
-function Start-AryaService([string]$Name, [string[]]$Arguments, [string]$HealthUrl, [string]$Executable = $Python, [switch]$Authenticated, [switch]$McpProbe) {
-  $Process = Start-Process $Executable -ArgumentList $Arguments -WorkingDirectory $Root -PassThru -WindowStyle Hidden
+function Start-AryaService([string]$Name, [string[]]$Arguments, [string]$HealthUrl, [string]$Executable = $Python, [string]$WorkingDirectory = $Root, [string]$BearerToken = '', [switch]$Authenticated, [switch]$McpProbe) {
+  $Process = Start-Process $Executable -ArgumentList $Arguments -WorkingDirectory $WorkingDirectory -PassThru -WindowStyle Hidden
   $script:Processes += $Process
   $Headers = @{}
-  if ($Authenticated) { $Headers.Authorization = "Bearer $env:DEVICE_TOKEN" }
+  if ($BearerToken) { $Headers.Authorization = "Bearer $BearerToken" }
+  elseif ($Authenticated) { $Headers.Authorization = "Bearer $env:DEVICE_TOKEN" }
   $Deadline = (Get-Date).AddSeconds(75)
   while ((Get-Date) -lt $Deadline) {
     if ($Process.HasExited) { throw "$Name exited before becoming healthy (exit code $($Process.ExitCode))." }
@@ -67,20 +68,22 @@ try {
   if (-not (Test-Path (Join-Path $GoogleMcpRoot '.venv\Scripts\python.exe'))) {
     throw 'The pinned Google MCP server is not set up. Run scripts/setup_google_mcp.ps1 -Account your-address@example.com first.'
   }
+  $GoogleServerPath = Join-Path $GoogleMcpRoot 'src\google_accounts_mcp\server.py'
+  if (-not (Select-String -Path $GoogleServerPath -Pattern 'host="127\.0\.0\.1"' -Quiet)) {
+    throw 'The pinned Google MCP server is not bound to loopback. Run scripts/setup_google_mcp.ps1 to apply the local bind patch.'
+  }
   $env:PORT = $GoogleMcpPort
   $env:MCP_BEARER_TOKEN = $env:GOOGLE_MCP_TOKEN
   $env:GOOGLE_CLIENT_ID = $env:GOOGLE_OAUTH_CLIENT_ID
   $env:GOOGLE_CLIENT_SECRET = $env:GOOGLE_OAUTH_CLIENT_SECRET
   $env:DEFAULT_ACCOUNT = $env:GOOGLE_ACCOUNT
-  if (-not $env:GOOGLE_MCP_TOKEN_DB_PATH) {
-    $env:GOOGLE_MCP_TOKEN_DB_PATH = Join-Path $env:LOCALAPPDATA 'Arya\google-accounts\tokens.db'
-  }
-  $env:TOKEN_DB_PATH = $env:GOOGLE_MCP_TOKEN_DB_PATH
-  $env:ATTACHMENTS_DIR = Join-Path $env:LOCALAPPDATA 'Arya\google-accounts\attachments'
+  $GoogleDataRoot = Join-Path $env:LOCALAPPDATA 'Arya\google-mcp-data'
+  $env:TOKEN_DB_PATH = Join-Path $GoogleDataRoot 'tokens.db'
+  $env:ATTACHMENTS_DIR = Join-Path $GoogleDataRoot 'attachments'
   New-Item -ItemType Directory -Path (Split-Path -Parent $env:TOKEN_DB_PATH) -Force | Out-Null
   New-Item -ItemType Directory -Path $env:ATTACHMENTS_DIR -Force | Out-Null
   $Uv = (Get-Command uv -ErrorAction Stop).Source
-  Start-AryaService 'google-workspace-mcp' @('run', '--project', $GoogleMcpRoot, '--locked', 'python', '-m', 'google_accounts_mcp.server') "http://127.0.0.1:$GoogleMcpPort/mcp" -Executable $Uv -Authenticated -McpProbe
+  Start-AryaService 'google-workspace-mcp' @('run', 'google-accounts-mcp') "http://127.0.0.1:$GoogleMcpPort/mcp" -Executable $Uv -WorkingDirectory $GoogleMcpRoot -BearerToken $env:GOOGLE_MCP_TOKEN -McpProbe
   Start-AryaService 'arya-core' @('-m', 'core') "http://127.0.0.1:$CorePort/health"
   Write-Host 'ARYA device, voice, Google Workspace MCP, and core are healthy. Press Ctrl+C here to stop them.'
   Wait-Process -Id $Processes.Id

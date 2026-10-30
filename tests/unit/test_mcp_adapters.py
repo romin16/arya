@@ -6,7 +6,7 @@ import pytest
 import yaml
 from langchain_core.tools import StructuredTool
 
-from core.mcp_adapters.google_workspace import adapt_google_tools
+from core.mcp_adapters.google_workspace import GOOGLE_EXPOSED_SOURCES, GOOGLE_TOOL_SOURCES, adapt_google_tools
 from core.mcp_adapters.tools import MCPToolAdapter
 from core.graph.runtime import google_mcp_connection
 from core.skills_runtime import SkillsRuntime
@@ -42,7 +42,7 @@ def make_tool(name, call):
 def test_google_mcp_connection_uses_local_streamable_http_and_token():
     assert google_mcp_connection("mock-token") == {
         "transport": "streamable_http",
-        "url": "http://127.0.0.1:5003/mcp",
+        "url": "http://127.0.0.1:8321/mcp",
         "headers": {"Authorization": "Bearer mock-token"},
     }
 
@@ -55,12 +55,7 @@ async def test_google_aliases_wrap_every_tool_and_protected_actions_refuse_befor
         calls.append(kwargs)
         return {"success": True}
 
-    sources = {
-        "search_email", "read_email", "read_thread", "draft_email", "send_email",
-        "modify_labels", "list_labels", "list_calendars", "list_events", "get_event",
-        "create_event", "update_event", "delete_event", "search_contacts", "list_contacts",
-        "get_contact", "create_contact", "update_contact", "delete_contact",
-    }
+    sources = GOOGLE_EXPOSED_SOURCES
     raw = [make_tool(name, record) for name in sorted(sources)]
     adapted = adapt_google_tools(raw, timeout_seconds=2, retries=1)
     for expected in (
@@ -70,7 +65,8 @@ async def test_google_aliases_wrap_every_tool_and_protected_actions_refuse_befor
         "contacts_update", "contacts_delete",
     ):
         assert expected in adapted
-    assert {f"google_{name}" for name in sources} <= adapted.keys()
+    assert set(GOOGLE_TOOL_SOURCES) <= adapted.keys()
+    assert not any("drive" in name or "task" in name for name in adapted)
 
     raw_send_count = len(calls)
     with pytest.raises(Exception, match="disabled until the Phase 6 approval flow"):
@@ -128,3 +124,41 @@ def test_policy_marks_mail_send_reply_and_deletes_as_ask_and_skills_resolve_nati
     assert skills.tool_names(["weather-search"]) == {"get_weather", "web_search"}
     assert "gmail_reply" in skills.tool_names(["email"])
     assert {"contacts_create", "contacts_update", "contacts_delete"} <= skills.tool_names(["contacts"])
+
+
+def test_google_environment_mapping_and_real_server_tool_names():
+    root = Path(__file__).resolve().parents[2]
+    launcher = (root / "deploy" / "start_all.ps1").read_text(encoding="utf-8")
+    setup = (root / "scripts" / "setup_google_mcp.ps1").read_text(encoding="utf-8")
+    for mapping in (
+        "$env:GOOGLE_CLIENT_ID = $env:GOOGLE_OAUTH_CLIENT_ID",
+        "$env:GOOGLE_CLIENT_SECRET = $env:GOOGLE_OAUTH_CLIENT_SECRET",
+        "$env:DEFAULT_ACCOUNT = $env:GOOGLE_ACCOUNT",
+        "$env:MCP_BEARER_TOKEN = $env:GOOGLE_MCP_TOKEN",
+    ):
+        assert mapping in launcher
+    for mapping in (
+        "$env:GOOGLE_CLIENT_ID = $env:GOOGLE_OAUTH_CLIENT_ID",
+        "$env:GOOGLE_CLIENT_SECRET = $env:GOOGLE_OAUTH_CLIENT_SECRET",
+        "$env:DEFAULT_ACCOUNT = $env:GOOGLE_ACCOUNT",
+        "$env:MCP_BEARER_TOKEN = $env:GOOGLE_MCP_TOKEN",
+        "$env:TOKEN_DB_PATH = $TokenDb",
+        "$env:ATTACHMENTS_DIR = $AttachmentsRoot",
+        "Arya\\google-mcp-data",
+        "SELECT 1 FROM accounts WHERE lower(email)=lower(?)",
+        "skipping OAuth",
+    ):
+        assert mapping in setup
+    assert "google-accounts-mcp')" in launcher
+    assert set(GOOGLE_TOOL_SOURCES.values()) == GOOGLE_EXPOSED_SOURCES
+    assert GOOGLE_EXPOSED_SOURCES == {
+        "list_accounts", "search_email", "read_email", "read_thread", "draft_email", "send_email",
+        "list_labels", "modify_labels", "list_attachments", "batch_list_attachments",
+        "download_attachment", "extract_attachment_text", "render_attachment_page", "archive_email",
+        "mark_read", "mark_unread", "list_calendars", "list_events", "get_event", "create_event",
+        "update_event", "delete_event", "quick_add_event", "move_event", "respond_to_event",
+        "list_instances", "free_busy", "create_calendar", "update_calendar", "delete_calendar",
+        "search_contacts", "list_contacts", "get_contact", "create_contact", "update_contact",
+        "delete_contact", "save_other_contact",
+    }
+    assert not any("drive" in name or "task" in name for name in GOOGLE_EXPOSED_SOURCES)

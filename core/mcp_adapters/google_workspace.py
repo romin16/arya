@@ -28,10 +28,12 @@ BLOCKED_UNTIL_PHASE6 = {
     "gmail_reply": "Replying to email is disabled until the Phase 6 approval flow is implemented. No email was sent.",
     "gmail_delete": "Moving email to Trash is disabled until the Phase 6 approval flow is implemented. No email was changed.",
     "calendar_delete": "Deleting calendar events is disabled until the Phase 6 approval flow is implemented. No event was deleted.",
+    "calendar_delete_calendar": "Deleting calendars is disabled until the Phase 6 approval flow is implemented. No calendar was deleted.",
     "contacts_delete": "Deleting contacts is disabled until the Phase 6 approval flow is implemented. No contact was deleted.",
 }
 
 GOOGLE_TOOL_SOURCES = {
+    "google_list_accounts": "list_accounts",
     "gmail_search": "search_email",
     "gmail_get": "read_email",
     "gmail_thread_get": "read_thread",
@@ -53,7 +55,27 @@ GOOGLE_TOOL_SOURCES = {
     "contacts_create": "create_contact",
     "contacts_update": "update_contact",
     "contacts_delete": "delete_contact",
+    "contacts_save_other": "save_other_contact",
+    "calendar_quick_add": "quick_add_event",
+    "calendar_move": "move_event",
+    "calendar_respond": "respond_to_event",
+    "calendar_instances": "list_instances",
+    "calendar_free_busy": "free_busy",
+    "calendar_create_calendar": "create_calendar",
+    "calendar_update_calendar": "update_calendar",
+    "calendar_delete_calendar": "delete_calendar",
+    "gmail_attachments": "list_attachments",
+    "gmail_attachments_batch": "batch_list_attachments",
+    "gmail_attachment_download": "download_attachment",
+    "gmail_attachment_extract_text": "extract_attachment_text",
+    "gmail_attachment_render_page": "render_attachment_page",
+    "gmail_archive": "archive_email",
+    "gmail_mark_read": "mark_read",
+    "gmail_mark_unread": "mark_unread",
 }
+
+GOOGLE_EXPOSED_SOURCES = set(GOOGLE_TOOL_SOURCES.values())
+GOOGLE_REQUIRED_SOURCES = GOOGLE_EXPOSED_SOURCES | {"send_email"}
 
 
 def adapt_google_tools(
@@ -61,10 +83,16 @@ def adapt_google_tools(
 ) -> dict[str, Any]:
     raw_by_name = {tool.name: tool for tool in raw_tools}
     tools: dict[str, Any] = {}
-    # Keep every server-discovered tool behind the same timeout/retry adapter.
+    # Expose only the Gmail, Calendar and Contacts surfaces. The upstream
+    # server also publishes Drive, Tasks and shared-file tools.
     for raw in raw_tools:
+        if raw.name not in GOOGLE_EXPOSED_SOURCES:
+            continue
         adapter = MCPToolAdapter(
-            public_name=f"google_{raw.name}",
+            public_name=next(
+                (name for name, source in GOOGLE_TOOL_SOURCES.items() if source == raw.name),
+                f"google_{raw.name}",
+            ),
             source_tool=raw,
             description=f"Google Workspace MCP tool: {raw.description or raw.name}",
             timeout_seconds=timeout_seconds,

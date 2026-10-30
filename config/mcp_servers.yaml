@@ -2,7 +2,7 @@ servers:
   google_workspace:
     enabled: true
     transport: streamable_http
-    url: http://127.0.0.1:5003/mcp
+    url: http://127.0.0.1:8321/mcp
     token_env: GOOGLE_MCP_TOKEN
     version: 0.2.1
     commit: 283988563f9af0c8f4886dde303c5a92d49cf571

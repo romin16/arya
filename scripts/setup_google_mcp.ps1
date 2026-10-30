@@ -7,6 +7,9 @@ $ErrorActionPreference = 'Stop'
 $Root = Split-Path -Parent $PSScriptRoot
 $EnvFile = Join-Path $Root '.env'
 $InstallRoot = Join-Path $env:LOCALAPPDATA 'Arya\google-accounts-mcp'
+$DataRoot = Join-Path $env:LOCALAPPDATA 'Arya\google-mcp-data'
+$TokenDb = Join-Path $DataRoot 'tokens.db'
+$AttachmentsRoot = Join-Path $DataRoot 'attachments'
 $PinnedCommit = '283988563f9af0c8f4886dde303c5a92d49cf571'
 $Repository = 'https://github.com/snickery/google-accounts-mcp.git'
 if (-not (Test-Path $EnvFile)) { throw 'Project .env not found. Copy .env.example and configure Google OAuth credentials first.' }
@@ -47,14 +50,24 @@ if ($WildcardCount -eq 1) {
 
 $env:GOOGLE_CLIENT_ID = $env:GOOGLE_OAUTH_CLIENT_ID
 $env:GOOGLE_CLIENT_SECRET = $env:GOOGLE_OAUTH_CLIENT_SECRET
-if (-not $env:GOOGLE_MCP_TOKEN_DB_PATH) {
-  $env:GOOGLE_MCP_TOKEN_DB_PATH = Join-Path $env:LOCALAPPDATA 'Arya\google-accounts\tokens.db'
-}
-$env:TOKEN_DB_PATH = $env:GOOGLE_MCP_TOKEN_DB_PATH
-New-Item -ItemType Directory -Path (Split-Path -Parent $env:TOKEN_DB_PATH) -Force | Out-Null
+$env:MCP_BEARER_TOKEN = $env:GOOGLE_MCP_TOKEN
+$env:PORT = '8321'
+if (-not $env:GOOGLE_ACCOUNT) { $env:GOOGLE_ACCOUNT = $Account }
+$env:DEFAULT_ACCOUNT = $env:GOOGLE_ACCOUNT
+$env:TOKEN_DB_PATH = $TokenDb
+$env:ATTACHMENTS_DIR = $AttachmentsRoot
+New-Item -ItemType Directory -Path $DataRoot -Force | Out-Null
+New-Item -ItemType Directory -Path $AttachmentsRoot -Force | Out-Null
 $Uv = (Get-Command uv -ErrorAction Stop).Source
 & $Uv sync --project $InstallRoot --locked
 if ($LASTEXITCODE -ne 0) { throw 'Could not install the pinned Google Workspace MCP dependencies.' }
-& $Uv run --project $InstallRoot --locked python scripts/authorize.py $Account
-if ($LASTEXITCODE -ne 0) { throw 'Google OAuth setup did not complete.' }
-Write-Host 'Google OAuth credentials were stored locally. The setup script did not print them.'
+$McpPython = Join-Path $InstallRoot '.venv\Scripts\python.exe'
+$HasAccount = & $McpPython -c "import sqlite3,sys; db=sqlite3.connect(sys.argv[1]); print('yes' if db.execute('SELECT 1 FROM accounts WHERE lower(email)=lower(?)', (sys.argv[2],)).fetchone() else 'no')" $TokenDb $Account
+if ($LASTEXITCODE -ne 0) { throw 'Could not inspect the local Google authorization database.' }
+if ($HasAccount -contains 'yes') {
+  Write-Host 'The requested Google account is already authorized; skipping OAuth.'
+} else {
+  & $Uv run --project $InstallRoot --locked scripts/authorize.py $Account
+  if ($LASTEXITCODE -ne 0) { throw 'Google OAuth setup did not complete.' }
+  Write-Host 'Google OAuth setup completed. Credentials were not printed.'
+}

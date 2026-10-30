@@ -23,4 +23,5 @@ tools:
   gmail_reply: {mode: ask}
   gmail_delete: {mode: ask}
   calendar_delete: {mode: ask}
+  calendar_delete_calendar: {mode: ask}
   contacts_delete: {mode: ask}
