@@ -21,7 +21,7 @@
 
    The launcher maps project OAuth and account values to `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, and `DEFAULT_ACCOUNT`, and maps `GOOGLE_MCP_TOKEN` to `MCP_BEARER_TOKEN`. It starts the documented `uv run google-accounts-mcp` command on port 8321, bound to `127.0.0.1`; core connects to `http://127.0.0.1:8321/mcp`. Health checks include a bearer-authenticated MCP initialize request. Press Ctrl+C in the launcher window to stop them.
 
-   Use `.\deploy\start_all.ps1 -NoCore` to start device, voice, and Google MCP without starting core. Core stdout and stderr are captured under `logs/`; if core exits, the launcher prints the last 40 lines from each stream.
+   Use `.\deploy\start_all.ps1 -NoCore` to start device, voice, and Google MCP without starting core. Each service writes to `logs/<service>.log` with stderr in a companion `logs/<service>.stderr.log`; if any service exits, the launcher prints the last 40 lines of both streams.
 
 ## Search provider
 

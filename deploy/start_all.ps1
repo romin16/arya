@@ -31,32 +31,35 @@ $GoogleMcpPort = '8321'
 if (-not $env:DEVICE_TOKEN) { throw 'DEVICE_TOKEN is required in .env for the authenticated device health check.' }
 if (-not $env:GOOGLE_MCP_TOKEN) { throw 'GOOGLE_MCP_TOKEN is required in .env for the authenticated Google MCP server.' }
 $Processes = @()
-$script:CoreProcess = $null
-$script:CoreStdoutPath = $null
-$script:CoreStderrPath = $null
+$LogDirectory = Join-Path $Root 'logs'
+New-Item -ItemType Directory -Path $LogDirectory -Force | Out-Null
+$script:ServiceNames = @{}
+$script:ReportedExits = @{}
 
-function Start-AryaService([string]$Name, [string[]]$Arguments, [string]$HealthUrl, [string]$Executable = $Python, [string]$WorkingDirectory = $Root, [string]$BearerToken = '', [string]$StdoutPath = '', [string]$StderrPath = '', [switch]$Authenticated, [switch]$McpProbe) {
-  $StartParameters = @{
-    FilePath = $Executable
-    ArgumentList = $Arguments
-    WorkingDirectory = $WorkingDirectory
-    PassThru = $true
-    WindowStyle = 'Hidden'
+function Show-ServiceOutput([string]$Name) {
+  $ServiceLogPath = Join-Path $LogDirectory "$Name.log"
+  $ErrorLogPath = Join-Path $LogDirectory "$Name.stderr.log"
+  foreach ($Path in @($ServiceLogPath, $ErrorLogPath)) {
+    if (Test-Path $Path) {
+      Write-Host "--- Last 40 lines from $Path ---"
+      Get-Content -LiteralPath $Path -Tail 40
+    }
   }
-  if ($StdoutPath) {
-    $StartParameters.RedirectStandardOutput = $StdoutPath
-    $StartParameters.RedirectStandardError = $StderrPath
-  }
-  $Process = Start-Process @StartParameters
+}
+
+function Start-AryaService([string]$Name, [string[]]$Arguments, [string]$HealthUrl, [string]$Executable = $Python, [string]$WorkingDirectory = $Root, [string]$BearerToken = '', [switch]$Authenticated, [switch]$McpProbe) {
+  $ServiceLogPath = Join-Path $LogDirectory "$Name.log"
+  $ErrorLogPath = Join-Path $LogDirectory "$Name.stderr.log"
+  $Process = Start-Process $Executable -ArgumentList $Arguments -WorkingDirectory $WorkingDirectory -PassThru -WindowStyle Hidden -RedirectStandardOutput $ServiceLogPath -RedirectStandardError $ErrorLogPath
   $script:Processes += $Process
-  if ($Name -eq 'arya-core') { $script:CoreProcess = $Process }
+  $script:ServiceNames[[string]$Process.Id] = $Name
   $Headers = @{}
   if ($BearerToken) { $Headers.Authorization = "Bearer $BearerToken" }
   elseif ($Authenticated) { $Headers.Authorization = "Bearer $env:DEVICE_TOKEN" }
   $Deadline = (Get-Date).AddSeconds(75)
   while ((Get-Date) -lt $Deadline) {
     if ($Process.HasExited) {
-      if ($Name -eq 'arya-core') { Show-CoreOutput }
+      Show-ServiceOutput $Name
       throw "$Name exited before becoming healthy (exit code $($Process.ExitCode))."
     }
     try {
@@ -83,15 +86,6 @@ function Start-AryaService([string]$Name, [string[]]$Arguments, [string]$HealthU
   throw "$Name did not become healthy within 75 seconds at $HealthUrl."
 }
 
-function Show-CoreOutput {
-  foreach ($Path in @($script:CoreStdoutPath, $script:CoreStderrPath)) {
-    if ($Path -and (Test-Path $Path)) {
-      Write-Host "--- Last 40 lines from $Path ---"
-      Get-Content -LiteralPath $Path -Tail 40
-    }
-  }
-}
-
 try {
   Start-AryaService 'arya-device' @('-m', 'device.server') "http://127.0.0.1:$DevicePort/health" -Authenticated
   Start-AryaService 'arya-voice' @('-m', 'voice.app') "http://127.0.0.1:$VoicePort/health"
@@ -116,19 +110,20 @@ try {
   $Uv = (Get-Command uv -ErrorAction Stop).Source
   Start-AryaService 'google-workspace-mcp' @('run', 'google-accounts-mcp') "http://127.0.0.1:$GoogleMcpPort/mcp" -Executable $Uv -WorkingDirectory $GoogleMcpRoot -BearerToken $env:GOOGLE_MCP_TOKEN -McpProbe
   if (-not $NoCore) {
-    $LogDirectory = Join-Path $Root 'logs'
-    New-Item -ItemType Directory -Path $LogDirectory -Force | Out-Null
-    $script:CoreStdoutPath = Join-Path $LogDirectory 'core.stdout.log'
-    $script:CoreStderrPath = Join-Path $LogDirectory 'core.stderr.log'
-    Start-AryaService 'arya-core' @('-m', 'core') "http://127.0.0.1:$CorePort/health" -StdoutPath $script:CoreStdoutPath -StderrPath $script:CoreStderrPath
+    Start-AryaService 'arya-core' @('-m', 'core') "http://127.0.0.1:$CorePort/health"
     Write-Host 'ARYA device, voice, Google Workspace MCP, and core are healthy. Press Ctrl+C here to stop them.'
   } else {
     Write-Host 'ARYA device, voice, and Google Workspace MCP are healthy. Core was skipped by -NoCore. Press Ctrl+C here to stop them.'
   }
   while ($Processes | Where-Object { -not $_.HasExited }) {
-    if (-not $NoCore -and $script:CoreProcess.HasExited) {
-      Show-CoreOutput
-      throw "arya-core exited (exit code $($script:CoreProcess.ExitCode))."
+    foreach ($Process in $Processes | Where-Object { $_.HasExited }) {
+      $ProcessKey = [string]$Process.Id
+      if (-not $script:ReportedExits.ContainsKey($ProcessKey)) {
+        $script:ReportedExits[$ProcessKey] = $true
+        $ServiceName = $script:ServiceNames[$ProcessKey]
+        Show-ServiceOutput $ServiceName
+        throw "$ServiceName exited (exit code $($Process.ExitCode))."
+      }
     }
     Start-Sleep -Seconds 1
   }
