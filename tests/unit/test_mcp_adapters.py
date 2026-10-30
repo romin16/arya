@@ -69,10 +69,14 @@ async def test_google_aliases_wrap_every_tool_and_protected_actions_refuse_befor
     assert not any("drive" in name or "task" in name for name in adapted)
 
     raw_send_count = len(calls)
-    with pytest.raises(Exception, match="disabled until the Phase 6 approval flow"):
-        await adapted["gmail_send"].ainvoke({"to": ["test@example.com"], "subject": "x", "body": "y"})
-    with pytest.raises(Exception, match="disabled until the Phase 6 approval flow"):
-        await adapted["gmail_delete"].ainvoke({"message_id": "message-id"})
+    send_refusal = await adapted["gmail_send"].ainvoke(
+        {"to": ["test@example.com"], "subject": "x", "body": "y"}
+    )
+    delete_refusal = await adapted["gmail_delete"].ainvoke({"message_id": "message-id"})
+    assert send_refusal["approval_required"] is True
+    assert "approval flow" in send_refusal["message"]
+    assert delete_refusal["approval_required"] is True
+    assert "approval flow" in delete_refusal["message"]
     assert len(calls) == raw_send_count == 0
 
     await adapted["gmail_search"].ainvoke({"query": "is:unread"})

@@ -75,6 +75,7 @@ class ARYAState(MessagesState, total=False):
     last_action: dict[str, Any] | None
     tainted: bool
     pending_approval: Any
+    refusal_message: str | None
     tool_rounds: int
 
 
@@ -426,6 +427,7 @@ class CoreGraphRuntime:
                 raise RuntimeError("Tool execution requested without a tool call")
             active_skills = list(state.get("active_skills", []))
             results: list[ToolMessage] = []
+            refusal_message = None
             timeout = float(self.limits.get("tool_timeout_seconds", 30))
             for call in assistant.tool_calls:
                 name = call["name"]
@@ -446,10 +448,22 @@ class CoreGraphRuntime:
                             if name not in {"web_search", "get_weather", "calculator"}:
                                 raise ValueError("tool is unavailable for the active skills")
                         result = await asyncio.wait_for(tool.ainvoke(args), timeout=timeout)
+                        if (
+                            isinstance(result, dict)
+                            and result.get("approval_required")
+                            and result.get("success") is False
+                        ):
+                            refusal_message = str(result.get("message", "Approval is not available yet."))
+                            status = "success"
                     content = _tool_content(result, self.vault)
                 except ToolRefused as exc:
-                    status = "error"
-                    content = str(exc)
+                    refusal_message = str(exc)
+                    status = "success"
+                    content = _tool_content({
+                        "success": False,
+                        "approval_required": True,
+                        "message": refusal_message,
+                    }, self.vault)
                 except Exception as exc:
                     status = "error"
                     message = str(exc)
@@ -471,7 +485,11 @@ class CoreGraphRuntime:
                     "event": "Tool",
                     "message": f"{name} {'completed' if status == 'success' else 'failed'}",
                 })
-            return {"messages": results, "active_skills": active_skills}
+            return {
+                "messages": results,
+                "active_skills": active_skills,
+                "refusal_message": refusal_message,
+            }
 
         async def action_logger(state: ARYAState) -> dict[str, Any]:
             assert self.pool is not None
@@ -498,6 +516,11 @@ class CoreGraphRuntime:
             get_stream_writer()({"kind": "complete"})
             return {}
 
+        async def refusal_response(state: ARYAState) -> dict[str, Any]:
+            message = state.get("refusal_message") or "Approval is not available yet. Nothing was changed."
+            get_stream_writer()({"kind": "token", "text": message})
+            return {"messages": [AIMessage(content=message)], "refusal_message": None}
+
         def after_agent(state: ARYAState) -> str:
             message = state["messages"][-1]
             if isinstance(message, AIMessage) and message.tool_calls:
@@ -513,6 +536,7 @@ class CoreGraphRuntime:
         builder.add_node("action_logger", action_logger)
         builder.add_node("cap_reached", cap_reached)
         builder.add_node("respond", respond)
+        builder.add_node("refusal_response", refusal_response)
         builder.add_edge(START, "ingest")
         builder.add_edge("ingest", "route")
         builder.add_edge("route", "agent")
@@ -522,7 +546,12 @@ class CoreGraphRuntime:
             {"tools": "tools", "respond": "respond", "cap_reached": "cap_reached"},
         )
         builder.add_edge("tools", "action_logger")
-        builder.add_edge("action_logger", "agent")
+        builder.add_conditional_edges(
+            "action_logger",
+            lambda state: "refusal" if state.get("refusal_message") else "agent",
+            {"refusal": "refusal_response", "agent": "agent"},
+        )
+        builder.add_edge("refusal_response", "respond")
         builder.add_edge("cap_reached", "respond")
         builder.add_edge("respond", END)
         return builder.compile(checkpointer=self.saver)
@@ -540,6 +569,7 @@ class CoreGraphRuntime:
             "active_skills": [],
             "tainted": False,
             "pending_approval": None,
+            "refusal_message": None,
             "tool_rounds": 0,
         }
         config = {"configurable": {"thread_id": session_id}}

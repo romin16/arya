@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import httpx
 import pytest
 from cryptography.fernet import Fernet
-from langchain_core.messages import AIMessageChunk, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessageChunk, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import StructuredTool
 from langgraph.checkpoint.memory import MemorySaver
 
@@ -299,3 +299,94 @@ async def test_runtime_start_checks_google_tools_with_mocked_servers(monkeypatch
     assert "gmail_search" in runtime.tools
     assert not any("drive" in name or "task" in name for name in runtime.tools)
     await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_protected_email_action_returns_clear_refusal_without_calling_google():
+    raw_email = "arya.test@example.com"
+    vault = PIIVault(b"test-hmac-secret", Fernet.generate_key())
+    token = vault.tokenise(raw_email)
+    calls = []
+
+    async def mock_send(
+        to: list[str],
+        subject: str,
+        body: str,
+        reply_to_message_id: str = "",
+        account: str = "",
+        cc: list[str] | None = None,
+        bcc: list[str] | None = None,
+        attachments: list[str] | None = None,
+    ):
+        calls.append((to, subject, body, reply_to_message_id, account, cc, bcc, attachments))
+        return {"success": True}
+
+    source = StructuredTool.from_function(
+        coroutine=mock_send,
+        name="send_email",
+        description="mock Gmail send",
+    )
+    google_tools = runtime_module.adapt_google_tools([source])
+
+    class EmailRouter:
+        async def ainvoke(self, messages):
+            return RouteDecision(likely_skills=["email"])
+
+    class ProtectedActionModel:
+        def __init__(self):
+            self.call_count = 0
+
+        def bind_tools(self, tools):
+            return self
+
+        async def astream(self, messages):
+            self.call_count += 1
+            system_text = next(message.content for message in messages if isinstance(message, SystemMessage))
+            assert raw_email not in system_text
+            if self.call_count > 1:
+                raise AssertionError("The model should not be called again after a protected action refusal.")
+            yield AIMessageChunk(
+                content="",
+                tool_call_chunks=[{
+                    "name": "gmail_send",
+                    "args": json.dumps({
+                        "to": [token],
+                        "subject": "Hello",
+                        "body": "hi",
+                    }),
+                    "id": "blocked-send",
+                    "index": 0,
+                }],
+            )
+
+    runtime = CoreGraphRuntime()
+    runtime.vault = vault
+    runtime.pool = FakePool()
+    runtime.saver = MemorySaver()
+    runtime.skills = SkillsRuntime(Path(__file__).resolve().parents[2] / "skills")
+    runtime.router_model = EmailRouter()
+    runtime.main_model = ProtectedActionModel()
+    runtime.tools = google_tools
+    runtime.limits = {"max_tool_rounds": 8, "tool_timeout_seconds": 2, "token_budget": 100}
+    runtime.persona = "Test persona"
+
+    async def load_skill(name: str) -> str:
+        return runtime.skills.load(name, [])[0]
+
+    runtime.load_skill_tool = StructuredTool.from_function(
+        coroutine=load_skill,
+        name="load_skill",
+        description="load a skill",
+    )
+    runtime.graph = runtime._build_graph()
+    events = [
+        event async for event in runtime.stream_turn(
+            SimpleNamespace(message="Send an email to myself saying hi", user_id="user-test"),
+            "thread-protected-send",
+        )
+    ]
+    response = "".join(event["chunk"] for event in events if "chunk" in event)
+    assert "approval flow is implemented" in response
+    assert "No email was sent" in response
+    assert calls == []
+    assert runtime.main_model.call_count == 1

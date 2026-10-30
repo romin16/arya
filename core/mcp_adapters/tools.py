@@ -51,7 +51,11 @@ class MCPToolAdapter:
 
     async def ainvoke(self, arguments: dict[str, Any]) -> Any:
         if self.refusal:
-            raise ToolRefused(self.refusal)
+            return {
+                "success": False,
+                "approval_required": True,
+                "message": self.refusal,
+            }
         if self.source_tool is None:
             raise RuntimeError(f"{self.public_name} is unavailable because its Google MCP tool is missing.")
         prepared = self.transform(arguments)
