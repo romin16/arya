@@ -194,6 +194,7 @@ class CoreGraphRuntime:
         self.weather_client: httpx.AsyncClient | None = None
         self.skills = SkillsRuntime(ROOT / "skills")
         self.vault: PIIVault | None = None
+        self.authorized_account_token = ""
         self.http_client: httpx.AsyncClient | None = None
         self.main_model: ChatOpenAI | None = None
         self.router_model: Any = None
@@ -223,6 +224,10 @@ class CoreGraphRuntime:
         )
         self.persona = (ROOT / "persona.md").read_text(encoding="utf-8").strip()
         self.vault = _load_vault(database_url)
+        authorized_account = os.getenv("GOOGLE_ACCOUNT", "").strip()
+        self.authorized_account_token = (
+            self.vault.tokenise(authorized_account) if authorized_account else ""
+        )
 
         self.pool = AsyncConnectionPool(
             conninfo=database_url,
@@ -382,11 +387,19 @@ class CoreGraphRuntime:
             model = self.main_model.bind_tools([self.load_skill_tool, *always_tools, *selected_tools])
             skill_context = self.skills.context(state.get("active_skills", []))
             last_action = state.get("last_action")
+            account_context = (
+                f"Authorized Google account: {self.authorized_account_token}. "
+                "If the user says ‘myself’ or ‘my account’, use this token as their account address. "
+                "Keep it as a token in tool arguments; the PII layer expands it only for tool execution.\n"
+                if self.authorized_account_token
+                else ""
+            )
             system_text = (
                 f"{self.persona}\n\n{FIXED_RULES}\n\nSkills index:\n{self.skills.index}\n\n"
                 f"Current time in IST: {state.get('now_ist', '')}.\n"
-                f"Last action: {json.dumps(last_action, ensure_ascii=False) if last_action else 'none'}\n"
-                f"Memory context: {state.get('memory_context', '')}"
+                + account_context
+                + f"Last action: {json.dumps(last_action, ensure_ascii=False) if last_action else 'none'}\n"
+                + f"Memory context: {state.get('memory_context', '')}"
             )
             if skill_context:
                 system_text += "\n\nActive skill instructions:\n" + skill_context

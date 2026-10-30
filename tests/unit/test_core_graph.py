@@ -281,6 +281,7 @@ async def test_runtime_start_checks_google_tools_with_mocked_servers(monkeypatch
     monkeypatch.setenv("DEVICE_TOKEN", "device-test-token")
     monkeypatch.setenv("GOOGLE_MCP_TOKEN", "google-test-token")
     monkeypatch.setenv("OPENAI_API_KEY", "openai-test-key")
+    monkeypatch.setenv("GOOGLE_ACCOUNT", "authorized@example.com")
     monkeypatch.setattr(runtime_module, "_load_vault", lambda _: PIIVault(b"test-secret", Fernet.generate_key()))
     monkeypatch.setattr(runtime_module, "AsyncConnectionPool", StartupPool)
     monkeypatch.setattr(runtime_module, "AsyncPostgresSaver", StartupSaver)
@@ -296,6 +297,8 @@ async def test_runtime_start_checks_google_tools_with_mocked_servers(monkeypatch
 
     await runtime.start()
     assert runtime.graph is not None
+    assert runtime.authorized_account_token.startswith("[EMAIL_")
+    assert "authorized@example.com" not in runtime.authorized_account_token
     assert "gmail_search" in runtime.tools
     assert not any("drive" in name or "task" in name for name in runtime.tools)
     await runtime.close()
@@ -343,6 +346,7 @@ async def test_protected_email_action_returns_clear_refusal_without_calling_goog
             self.call_count += 1
             system_text = next(message.content for message in messages if isinstance(message, SystemMessage))
             assert raw_email not in system_text
+            assert token in system_text
             if self.call_count > 1:
                 raise AssertionError("The model should not be called again after a protected action refusal.")
             yield AIMessageChunk(
@@ -366,6 +370,7 @@ async def test_protected_email_action_returns_clear_refusal_without_calling_goog
     runtime.skills = SkillsRuntime(Path(__file__).resolve().parents[2] / "skills")
     runtime.router_model = EmailRouter()
     runtime.main_model = ProtectedActionModel()
+    runtime.authorized_account_token = token
     runtime.tools = google_tools
     runtime.limits = {"max_tool_rounds": 8, "tool_timeout_seconds": 2, "token_budget": 100}
     runtime.persona = "Test persona"
