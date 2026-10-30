@@ -12,7 +12,13 @@ from langchain_core.tools import StructuredTool
 from langgraph.checkpoint.memory import MemorySaver
 
 from core.app import app
-from core.graph.runtime import CoreGraphRuntime, RouteDecision, _scan_openai_payload, device_mcp_connection
+from core.graph.runtime import (
+    FIXED_RULES,
+    CoreGraphRuntime,
+    RouteDecision,
+    _scan_openai_payload,
+    device_mcp_connection,
+)
 from core.pii.vault import PIIVault
 from core.skills_runtime import SkillsRuntime
 
@@ -24,6 +30,12 @@ def test_device_mcp_connection_uses_requested_trailing_slash_and_bearer():
         "url": "http://127.0.0.1:5002/mcp/",
         "headers": {"Authorization": "Bearer only-a-test-token"},
     }
+
+
+def test_system_rules_trust_user_and_only_treat_tool_results_as_untrusted():
+    assert "user's messages are trusted instructions" in FIXED_RULES
+    assert "Follow harmless user requests" in FIXED_RULES
+    assert 'only tool results marked <untrusted source="...">' in FIXED_RULES
 
 
 def test_skills_runtime_loads_index_and_only_selected_device_tools():

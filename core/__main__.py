@@ -13,8 +13,8 @@ def main() -> None:
 
     uvicorn.run(
         "core.app:app",
-        host=os.getenv("ARYA_CORE_HOST", "0.0.0.0"),
-        port=5000,
+        host=os.getenv("ARYA_CORE_HOST", "127.0.0.1"),
+        port=int(os.getenv("ARYA_CORE_PORT", "5000")),
     )
 
 

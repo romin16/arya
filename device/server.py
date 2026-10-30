@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hmac
 import os
+from pathlib import Path
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
@@ -21,7 +22,7 @@ def _load_dotenv() -> None:
         from dotenv import load_dotenv
     except ImportError:
         return
-    load_dotenv()
+    load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
 
 _load_dotenv()
@@ -37,7 +38,12 @@ whatsapp = WhatsAppAgent()
 vscode = VSCodeAgent()
 spotify_playing: bool | None = None
 
-mcp = FastMCP("arya-device", host="127.0.0.1", port=5002, streamable_http_path="/mcp")
+mcp = FastMCP(
+    "arya-device",
+    host=os.getenv("ARYA_DEVICE_HOST", "127.0.0.1"),
+    port=int(os.getenv("ARYA_DEVICE_PORT", "5002")),
+    streamable_http_path="/mcp",
+)
 
 
 @mcp.tool()
@@ -230,7 +236,11 @@ app = create_asgi_app()
 def main() -> None:
     import uvicorn
 
-    uvicorn.run(app, host="127.0.0.1", port=5002)
+    uvicorn.run(
+        app,
+        host=os.getenv("ARYA_DEVICE_HOST", "127.0.0.1"),
+        port=int(os.getenv("ARYA_DEVICE_PORT", "5002")),
+    )
 
 
 if __name__ == "__main__":

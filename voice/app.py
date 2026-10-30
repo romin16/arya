@@ -1,4 +1,11 @@
 """Voice API scaffold. Provider calls are kept in an isolated process by design."""
+import os
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).resolve().parents[1] / ".env")
+
 from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -25,3 +32,17 @@ async def transcribe(audio: UploadFile = File(...)):
 @app.post("/stop")
 async def stop():
     return {"success": True}
+
+
+def main() -> None:
+    import uvicorn
+
+    uvicorn.run(
+        "voice.app:app",
+        host=os.getenv("ARYA_VOICE_HOST", "127.0.0.1"),
+        port=int(os.getenv("ARYA_VOICE_PORT", "5001")),
+    )
+
+
+if __name__ == "__main__":
+    main()
