@@ -8,7 +8,7 @@ import os
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Annotated, Any, TypedDict
+from typing import Any
 from zoneinfo import ZoneInfo
 from uuid import uuid4
 
@@ -30,7 +30,6 @@ from pydantic import BaseModel, Field
 from core.graph.action_logger import latest_action_entries, persist_action_entries
 from core.mcp_adapters.google_workspace import (
     GOOGLE_REQUIRED_SOURCES,
-    GOOGLE_TOOL_SOURCES,
     adapt_google_tools,
 )
 from core.mcp_adapters.tools import MCPToolAdapter, ToolRefused
@@ -236,7 +235,6 @@ class CoreGraphRuntime:
         await self.saver.setup()
 
         mcp_config = yaml.safe_load((ROOT / "config" / "mcp_servers.yaml").read_text(encoding="utf-8"))
-        device_config = mcp_config["servers"]["arya_device"]
         google_config = mcp_config["servers"]["google_workspace"]
         device_connection = device_mcp_connection(token)
         google_connection = google_mcp_connection(

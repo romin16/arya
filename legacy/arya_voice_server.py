@@ -93,7 +93,7 @@ def generate_audio_bytes(text: str) -> bytes:
     Raises on error.
     """
     audio_gen = elevenlabs_client.text_to_speech.convert(
-        voice_id=el_voice_id,
+        voice_id=get_voice_id(),
         text=text,
         model_id="eleven_turbo_v2_5",   # free-tier compatible
     )

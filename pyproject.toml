@@ -52,6 +52,12 @@ testpaths = ["tests"]
 [tool.ruff]
 line-length = 100
 
+[tool.ruff.lint.per-file-ignores]
+# Preserve imported legacy snapshots and the Phase 2 copied agent classes.
+# The legacy voice snapshot's undefined voice ID is fixed directly.
+"legacy/**/*.py" = ["F401", "E402", "F841", "E722", "E701", "E702"]
+"device/legacy_agents/**/*.py" = ["F401", "E722"]
+
 [dependency-groups]
 dev = [
     "pytest>=8.3.5",

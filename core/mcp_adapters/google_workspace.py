@@ -104,12 +104,15 @@ def adapt_google_tools(
         raw = raw_by_name.get(source_name)
         refusal = BLOCKED_UNTIL_PHASE6.get(public_name)
         if public_name == "gmail_delete":
-            transform = lambda args: {
-                "message_id": args["message_id"],
-                "add_labels": ["TRASH"],
-                "remove_labels": [],
-                "account": args.get("account", ""),
-            }
+            def trash_message(args: dict[str, Any]) -> dict[str, Any]:
+                return {
+                    "message_id": args["message_id"],
+                    "add_labels": ["TRASH"],
+                    "remove_labels": [],
+                    "account": args.get("account", ""),
+                }
+
+            transform = trash_message
             schema = DeleteEmailArgs
             description = "Move a Gmail message to Trash. Requires approval (currently disabled)."
         elif public_name == "gmail_reply":

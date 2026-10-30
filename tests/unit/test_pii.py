@@ -1,5 +1,3 @@
-import base64
-import os
 import pytest
 
 from core.pii.vault import PIIVault, StreamingDetokenizer

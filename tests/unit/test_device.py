@@ -157,7 +157,8 @@ def test_fastmcp_registers_typed_device_tools_and_mocked_win32_focus(monkeypatch
 async def test_every_device_tool_returns_plain_json_dict_through_mocked_layer(monkeypatch):
     server, _, _, _ = load_device_server(monkeypatch)
     server.queue = SerialDesktopQueue(action_timeout=2)
-    success = lambda *args: {"success": True, "args": list(args)}
+    def success(*args):
+        return {"success": True, "args": list(args)}
     server.desktop = SimpleNamespace(
         spotify_search=success,
         spotify_play_pause=success,

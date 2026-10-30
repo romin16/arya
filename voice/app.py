@@ -14,7 +14,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from voice.pii_mask import mask_for_tts
 from voice.stt_filter import is_known_hallucination, load_stt_settings, measure_audio
