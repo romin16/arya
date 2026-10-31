@@ -12,6 +12,7 @@ from langchain_core.tools import StructuredTool
 from langgraph.checkpoint.memory import MemorySaver
 
 from core.graph.runtime import CoreGraphRuntime, MemoryWrite, RouteDecision
+from core.memory.normalization import canonical_entity_key, explicit_user_rules
 from core.memory.policy_gate import hard_rule_for
 from core.pii.vault import PIIVault
 from core.skills_runtime import SkillsRuntime
@@ -27,7 +28,28 @@ def test_hard_procedural_rules_block_calls_in_code():
     }]
     assert hard_rule_for("web_search", {"query": "equity funds"}, rules) == rules[0]
     assert hard_rule_for("web_search", {"query": "weather in Pune"}, rules) is None
-    assert hard_rule_for("whatsapp_send", {}, [{**rules[0], "tool_pattern": "whatsapp_*"}]) is not None
+    assert hard_rule_for(
+        "whatsapp_send",
+        {"query": "equity funds"},
+        [{**rules[0], "tool_pattern": "whatsapp_*"}],
+    ) is not None
+
+
+def test_contact_rules_get_tool_and_case_insensitive_argument_constraint_but_casual_chat_does_not():
+    rule, = explicit_user_rules(["Never message Aditya on WhatsApp again."])
+    assert rule["tool_pattern"] == "whatsapp_send"
+    assert rule["argument_constraints"] == [{
+        "argument": "contact", "operator": "contains_casefold", "value": "Aditya",
+    }]
+    assert hard_rule_for("whatsapp_send", {"contact": "aDiTyA", "message": "hello"}, [rule]) is rule
+    assert hard_rule_for("whatsapp_send", {"contact": "Anita", "message": "hello"}, [rule]) is None
+    assert explicit_user_rules(["Never run out of tech talk at the water cooler."]) == []
+
+
+def test_employment_and_workplace_aliases_share_canonical_entity_key():
+    assert canonical_entity_key("employment") == "employer"
+    assert canonical_entity_key("workplace") == "employer"
+    assert canonical_entity_key("Company Name") == "employer"
 
 
 def test_memory_writer_schema_uses_typed_objects_supported_by_openai_strict_output():
@@ -54,7 +76,14 @@ async def test_memory_routing_eval_uses_mock_structured_llm_for_paraphrases_and_
         for case in dataset
         for utterance in case["utterances"]
     }
-    expected_by_phrase.update({utterance.casefold(): ("none", None) for case in dataset for utterance in case.get("negatives", [])})
+    for case in dataset:
+        for negative in case.get("negatives", []):
+            if isinstance(negative, str):
+                expected_by_phrase[negative.casefold()] = ("none", None)
+            else:
+                expected_by_phrase[negative["utterance"].casefold()] = (
+                    negative.get("operation", "none"), negative.get("store"),
+                )
 
     class MockRouter:
         async def ainvoke(self, messages):
@@ -78,7 +107,7 @@ async def test_route_uses_one_structured_call_and_passes_last_action_to_resolve_
 
         async def ainvoke(self, messages):
             self.calls.append(messages)
-            return RouteDecision(likely_skills=["spotify"])
+            return RouteDecision(likely_skills=["spotify"], memory_intent="none")
 
     class Agent:
         def __init__(self):
@@ -146,6 +175,91 @@ async def test_memory_write_is_queued_without_waiting_for_the_writer():
 
 
 @pytest.mark.asyncio
+async def test_mocked_model_cannot_bypass_hard_contact_rule_for_whatsapp_send():
+    rule = explicit_user_rules(["Never message Aditya on WhatsApp again."])[0]
+    tool_calls = []
+
+    class Pool:
+        class Connection:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return False
+
+            async def execute(self, query, params):
+                return None
+
+        def connection(self):
+            return self.Connection()
+
+    class Router:
+        async def ainvoke(self, messages):
+            return RouteDecision(likely_skills=["whatsapp"], memory_intent="none")
+
+    class Memory:
+        async def always_context_and_procedures(self, user_id, *, token_budget):
+            return "hard procedure", [rule]
+
+        async def routed_reads(self, user_id, reads):
+            return ""
+
+    class Agent:
+        def __init__(self):
+            self.calls = 0
+
+        def bind_tools(self, tools):
+            return self
+
+        async def astream(self, messages):
+            self.calls += 1
+            if self.calls == 1:
+                yield AIMessageChunk(content="", tool_call_chunks=[{
+                    "name": "whatsapp_send",
+                    "args": json.dumps({"contact": "aDiTyA", "message": "Hi"}),
+                    "id": "blocked-send",
+                    "index": 0,
+                }])
+            else:
+                yield AIMessageChunk(content="I blocked that message.")
+
+    async def send(contact: str, message: str):
+        tool_calls.append((contact, message))
+        return {"success": True}
+
+    runtime = CoreGraphRuntime()
+    runtime.pool = Pool()
+    runtime.saver = MemorySaver()
+    runtime.vault = PIIVault(b"policy-graph-test", Fernet.generate_key())
+    runtime.skills = SkillsRuntime(Path(__file__).resolve().parents[2] / "skills")
+    runtime.router_model = Router()
+    runtime.main_model = Agent()
+    runtime.memory = Memory()
+    assert hard_rule_for("whatsapp_send", {"contact": "aDiTyA", "message": "Hi"}, [rule]) is rule
+    runtime.tools = {
+        "whatsapp_send": StructuredTool.from_function(coroutine=send, name="whatsapp_send", description="Send a WhatsApp message")
+    }
+    runtime.device_tools = runtime.tools
+    runtime.limits = {"max_tool_rounds": 8, "tool_timeout_seconds": 2, "token_budget": 100}
+    runtime.persona = "Test"
+
+    async def load_skill(name: str):
+        return runtime.skills.load(name, [])[0]
+
+    runtime.load_skill_tool = StructuredTool.from_function(coroutine=load_skill, name="load_skill", description="Load a skill")
+    runtime.graph = runtime._build_graph()
+    events = [event async for event in runtime.stream_turn(
+        SimpleNamespace(message="Send a WhatsApp message to Aditya", user_id="policy-user"),
+        "blocked-contact",
+    )]
+    response = "".join(event["chunk"] for event in events if "chunk" in event)
+    assert tool_calls == []
+    assert "Blocked by a standing rule" in response
+    assert "Nothing was changed" in response
+    await asyncio.gather(*runtime.background_tasks, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 async def test_background_writer_logs_empty_extraction_and_persistence(caplog):
     caplog.set_level(logging.INFO, logger="arya.core")
     class Writer:
@@ -153,8 +267,11 @@ async def test_background_writer_logs_empty_extraction_and_persistence(caplog):
             return MemoryWrite()
 
     class Memory:
-        async def write_records(self, user_id, thread_id, records):
+        async def write_records(self, user_id, thread_id, records, *, user_texts):
             assert records == {"entities": [], "procedures": [], "episode": None, "patterns": []}
+            assert user_id == "user-test"
+            assert user_texts == ["remember my preference"]
+            return {"entities": 0, "procedures": 0, "episodes": 0, "patterns": 0}
 
     runtime = CoreGraphRuntime()
     runtime.vault = PIIVault(b"write-log-test", Fernet.generate_key())

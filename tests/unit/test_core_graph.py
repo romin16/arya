@@ -116,7 +116,7 @@ async def test_sse_errors_emit_apology_error_activity_and_done():
 class FakeRouter:
     async def ainvoke(self, messages):
         assert isinstance(messages[-1], HumanMessage)
-        return RouteDecision(likely_skills=["whatsapp"])
+        return RouteDecision(likely_skills=["whatsapp"], memory_intent="none")
 
 
 class FakePool:
@@ -277,6 +277,7 @@ async def test_email_request_with_real_server_schemas_passes_strict_egress():
             return RouteDecision(
                 likely_skills=["email"],
                 memory_reads=[{"store": "episode", "query": "prior email request"}],
+                memory_intent="episode_read",
             )
 
     class FakeMemory:
@@ -486,7 +487,7 @@ async def test_protected_email_action_returns_clear_refusal_without_calling_goog
 
     class EmailRouter:
         async def ainvoke(self, messages):
-            return RouteDecision(likely_skills=["email"])
+            return RouteDecision(likely_skills=["email"], memory_intent="none")
 
     class ProtectedActionModel:
         def __init__(self):

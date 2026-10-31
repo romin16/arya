@@ -68,7 +68,7 @@ class RouteDecision(BaseModel):
     memory_intent: Literal[
         "entity_read", "episode_read", "knowledge_read", "entity_update_and_episode_write",
         "procedural_write", "pattern_read", "none",
-    ] = "none"
+    ]
 
 
 class MemoryRead(BaseModel):
@@ -83,11 +83,19 @@ class MemoryEntity(BaseModel):
     confidence: float = 1.0
 
 
+class MemoryArgumentConstraint(BaseModel):
+    argument: str
+    operator: Literal["contains_casefold", "equals_casefold", "token_contains_casefold", "token_equals_casefold"]
+    value: str
+
+
 class MemoryProcedure(BaseModel):
     rule_text: str
     scope: str = "global"
     tool_pattern: str | None = None
     severity: Literal["hard", "soft"] = "soft"
+    confidence: float = 0.3
+    argument_constraints: list[MemoryArgumentConstraint] = Field(default_factory=list)
 
 
 class MemoryEpisode(BaseModel):
@@ -130,11 +138,13 @@ class ARYAState(MessagesState, total=False):
     now_ist: str
     memory_context: str
     active_skills: list[str]
+    procedures: list[dict[str, Any]]
     last_action: dict[str, Any] | None
     tainted: bool
     pending_approval: Any
     refusal_message: str | None
     pending_forget: list[dict[str, Any]] | None
+    memory_forget_message: str | None
     tool_rounds: int
 
 
@@ -248,6 +258,38 @@ def _tool_content(value: Any, vault: PIIVault) -> str | list[dict[str, Any]]:
     return json.dumps(safe, ensure_ascii=False, default=str)
 
 
+def _forget_items_text(items: list[dict[str, Any]], *, field: str = "preview") -> str:
+    return "\n".join(
+        f"- {item.get('store', 'memory')}: {item.get(field, item.get('reason', 'unknown item'))}"
+        for item in items
+    )
+
+
+def _forget_preview_reply(result: dict[str, Any]) -> str:
+    count = int(result.get("found_count", len(result.get("found_items", []))))
+    items = result.get("found_items", result.get("will_delete", []))
+    if not count:
+        return "Found 0 matching memory items. Nothing was deleted."
+    return (
+        f"Found {count} matching memory item(s):\n{_forget_items_text(items)}\n"
+        "Nothing was deleted. Reply ‘confirm’ to delete exactly this list."
+    )
+
+
+def _forget_delete_reply(result: dict[str, Any]) -> str:
+    found = int(result.get("found_count", len(result.get("found_items", []))))
+    deleted = int(result.get("deleted_count", 0))
+    failed = int(result.get("failed_count", 0))
+    parts = [f"Found {found} matching memory item(s). Deleted {deleted}; {failed} failed."]
+    deleted_items = result.get("deleted_items", [])
+    failed_items = result.get("failed_items", [])
+    if deleted_items:
+        parts.append("Deleted:\n" + _forget_items_text(deleted_items))
+    if failed_items:
+        parts.append("Failed:\n" + _forget_items_text(failed_items, field="reason"))
+    return "\n".join(parts)
+
+
 class CoreGraphRuntime:
     """Owns the model clients, device MCP tools, saver, and compiled graph."""
 
@@ -322,7 +364,12 @@ class CoreGraphRuntime:
         async def embed_query(text: str) -> list[float]:
             safe_text = self.vault.tokenise(text)
             return await self.embedding_model.aembed_query(safe_text)
-        self.memory = MemoryService(MemoryRepositories(self.pool), self.vault, embed_query)
+        self.memory = MemoryService(
+            MemoryRepositories(self.pool),
+            self.vault,
+            embed_query,
+            tombstone_suppression_days=int(model_settings.get("memory", {}).get("tombstone_suppression_days", 90)),
+        )
 
         mcp_config = yaml.safe_load((ROOT / "config" / "mcp_servers.yaml").read_text(encoding="utf-8"))
         google_config = mcp_config["servers"]["google_workspace"]
@@ -472,10 +519,43 @@ class CoreGraphRuntime:
                 logger.error("memory_write_skipped reason=writer_model_unavailable turn=%s", turn_hash)
                 return
             logger.info("memory_write_started turn=%s", turn_hash)
-            recent = state.get("messages", [])[-12:]
+            all_messages = state.get("messages", [])
+            latest_user_index = next(
+                (index for index in range(len(all_messages) - 1, -1, -1) if isinstance(all_messages[index], HumanMessage)),
+                0,
+            )
+            turn_messages = all_messages[latest_user_index:]
+            forget_tool_called = any(
+                isinstance(message, AIMessage)
+                and any(call.get("name") == "memory_forget" for call in message.tool_calls)
+                for message in turn_messages
+            )
+            latest_user_text = _text_value(all_messages[latest_user_index].content) if all_messages else ""
+            forget_request = bool(re.match(
+                r"\s*(?:please\s+)?(?:forget\b|remove\b.{0,80}\bfrom\s+memory\b|delete\b.{0,80}\bmemory\b)",
+                latest_user_text,
+                re.I,
+            ))
+            forget_confirmation = bool(
+                state.get("pending_forget")
+                and re.fullmatch(r"\s*(?:yes|confirm|proceed|delete|do it)\s*[.!]?\s*", latest_user_text, re.I)
+            )
+            if forget_tool_called or forget_request or forget_confirmation:
+                logger.info("memory_write_skipped reason=forget_turn turn=%s", turn_hash)
+                return
+            recent = turn_messages[-12:]
+            user_texts = [
+                _text_value(message.content)
+                for message in turn_messages
+                if isinstance(message, HumanMessage)
+            ]
             serialised = []
             for message in recent:
-                role = "user" if isinstance(message, HumanMessage) else "assistant"
+                role = (
+                    "user" if isinstance(message, HumanMessage)
+                    else "tool" if isinstance(message, ToolMessage)
+                    else "assistant"
+                )
                 serialised.append({"role": role, "content": self.vault.tokenise(_text_value(message.content))})
             extracted = await self.memory_writer_model.ainvoke([
                 SystemMessage(content=(
@@ -485,7 +565,9 @@ class CoreGraphRuntime:
                     "only in an entity or episode. Put first-person recurring behavior stated with words like 'usually' "
                     "or 'often' in patterns, with conservative confidence and evidence_count 1. Do not invent repetition "
                     "from a one-time event. Store durable current facts in entities; summarize the relevant conversation "
-                    "in episode. Return empty fields only when that category is genuinely unsupported. All content is "
+                    "in episode. Keep standing instructions out of entities. For a WhatsApp contact prohibition, set "
+                    "tool_pattern to whatsapp_send and a contact contains_casefold argument constraint for the named contact. "
+                    "Return empty fields only when that category is genuinely unsupported. All content is "
                     "PII-tokenized; preserve tokens exactly, and extract only from user-authored content, not tool results."
                 )),
                 HumanMessage(content=json.dumps({"messages": serialised, "tools": latest_action_entries(recent)}, ensure_ascii=False)),
@@ -502,10 +584,12 @@ class CoreGraphRuntime:
             logger.info("memory_write_extracted turn=%s counts=%s", turn_hash, counts)
             if not any(counts.values()):
                 logger.warning("memory_write_empty_extraction turn=%s", turn_hash)
-            await self.memory.write_records(state["user_id"], state["thread_id"], records)
+            persisted_counts = await self.memory.write_records(
+                state["user_id"], state["thread_id"], records, user_texts=user_texts,
+            )
             logger.info(
-                "memory_write_persisted turn=%s counts=%s elapsed_ms=%d",
-                turn_hash, counts, int((asyncio.get_running_loop().time() - started) * 1000),
+                "memory_write_persisted turn=%s accepted_counts=%s elapsed_ms=%d",
+                turn_hash, persisted_counts, int((asyncio.get_running_loop().time() - started) * 1000),
             )
         except Exception:
             logger.exception("Background memory_write failed turn=%s", turn_hash)
@@ -559,6 +643,11 @@ class CoreGraphRuntime:
                 "Classify the memory intent as entity_read, episode_read, knowledge_read, entity_update_and_episode_write, "
                 "procedural_write, pattern_read, or none. A current-fact question is entity_read; an explicit job/fact update "
                 "is entity_update_and_episode_write; an explicit standing rule is procedural_write. "
+                "Examples: 'What is my current salary?' => entity_read, no routed read; 'What did we decide last April?' "
+                "=> episode_read and a date-filtered episode read; 'How does a SIP work?' => knowledge_read and a knowledge read; "
+                "'I just changed jobs to TCS' => entity_update_and_episode_write; 'Never recommend equity to me again' "
+                "=> procedural_write; 'I'm worried about market volatility' => pattern_read and a pattern read; "
+                "'What is the average salary for a Python developer?' => none. "
                 "If the request is a short reference such as 'pause it' or 'do it again', use the prior last_action context "
                 "to resolve the reference. Never invent memory facts.\n\n"
                 f"Skill index:\n{index}\nLast action: {json.dumps(last_action, ensure_ascii=False) if last_action else 'none'}"
@@ -655,6 +744,7 @@ class CoreGraphRuntime:
             active_skills = list(state.get("active_skills", []))
             results: list[ToolMessage] = []
             refusal_message = None
+            memory_forget_message = None
             pending_forget = state.get("pending_forget")
             timeout = float(self.limits.get("tool_timeout_seconds", 30))
             for call in assistant.tool_calls:
@@ -677,12 +767,13 @@ class CoreGraphRuntime:
                             user_text = _text_value(next((message.content for message in reversed(messages) if isinstance(message, HumanMessage)), ""))
                             explicit = bool(re.fullmatch(r"\s*(yes|confirm|delete|forget|proceed|do it)\s*[.!]?\s*", user_text, re.I))
                             if bool(safe_args.get("confirm")) and pending and explicit:
-                                deleted = await self.memory.repositories.delete_candidates(state["user_id"], pending)
+                                result = await self.memory.delete_candidates(state["user_id"], pending)
                                 pending_forget = None
-                                result = {"deleted": deleted, "confirmation_required": False, "deleted_items": pending}
+                                memory_forget_message = _forget_delete_reply(result)
                             else:
                                 result = await self.memory.forget(state["user_id"], str(safe_args.get("query", "")), confirm=False)
                                 pending_forget = result.get("will_delete", [])
+                                memory_forget_message = _forget_preview_reply(result)
                     elif name == "load_skill":
                         body, active_skills = self.skills.load(args["name"], active_skills)
                         result: Any = body
@@ -719,6 +810,18 @@ class CoreGraphRuntime:
                 except Exception as exc:
                     status = "error"
                     message = str(exc)
+                    if name == "memory_forget":
+                        memory_forget_message = "Memory deletion could not be completed. Nothing is reported as deleted."
+                        content = _tool_content({
+                            "found_count": len(state.get("pending_forget") or []),
+                            "deleted_count": 0,
+                            "failed_count": 1,
+                            "failed_items": [{"reason": "memory deletion failed"}],
+                            "message": memory_forget_message,
+                        }, self.vault)
+                        result_message = ToolMessage(content=content, name=name, tool_call_id=call["id"], status="error")
+                        results.append(result_message)
+                        continue
                     if "unknown token" in message:
                         content = "unknown token"
                     elif "Google MCP tool " in message or "Google CSE" in message or "Tavily" in message or "Brave Search" in message or "location" in message or "expression" in message or "calculate" in message:
@@ -741,6 +844,7 @@ class CoreGraphRuntime:
                 "messages": results,
                 "active_skills": active_skills,
                 "refusal_message": refusal_message,
+                "memory_forget_message": memory_forget_message,
                 **({"pending_forget": pending_forget} if "pending_forget" in locals() else {}),
             }
 
@@ -780,6 +884,11 @@ class CoreGraphRuntime:
             get_stream_writer()({"kind": "token", "text": message})
             return {"messages": [AIMessage(content=message)], "refusal_message": None}
 
+        async def memory_forget_response(state: ARYAState) -> dict[str, Any]:
+            message = state.get("memory_forget_message") or "Memory deletion produced no result. Nothing is reported as deleted."
+            get_stream_writer()({"kind": "token", "text": message})
+            return {"messages": [AIMessage(content=message)], "memory_forget_message": None}
+
         def after_agent(state: ARYAState) -> str:
             message = state["messages"][-1]
             if isinstance(message, AIMessage) and message.tool_calls:
@@ -796,6 +905,7 @@ class CoreGraphRuntime:
         builder.add_node("cap_reached", cap_reached)
         builder.add_node("respond", respond)
         builder.add_node("refusal_response", refusal_response)
+        builder.add_node("memory_forget_response", memory_forget_response)
         builder.add_edge(START, "ingest")
         builder.add_edge("ingest", "route")
         builder.add_edge("route", "agent")
@@ -807,10 +917,11 @@ class CoreGraphRuntime:
         builder.add_edge("tools", "action_logger")
         builder.add_conditional_edges(
             "action_logger",
-            lambda state: "refusal" if state.get("refusal_message") else "agent",
-            {"refusal": "refusal_response", "agent": "agent"},
+            lambda state: "forget" if state.get("memory_forget_message") else ("refusal" if state.get("refusal_message") else "agent"),
+            {"forget": "memory_forget_response", "refusal": "refusal_response", "agent": "agent"},
         )
         builder.add_edge("refusal_response", "respond")
+        builder.add_edge("memory_forget_response", "respond")
         builder.add_edge("cap_reached", "respond")
         builder.add_edge("respond", END)
         return builder.compile(checkpointer=self.saver)
