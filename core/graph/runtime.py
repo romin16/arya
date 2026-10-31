@@ -134,7 +134,16 @@ def _scan_openai_payload(vault: PIIVault):
             payload = json.loads(body)
         except (json.JSONDecodeError, UnicodeDecodeError):
             payload = body.decode("utf-8", errors="replace")
-        guard_payload(payload, vault, strict=True)
+        safe_payload = guard_payload(payload, vault, strict=None, location="model request")
+        if safe_payload != payload:
+            safe_body = (
+                safe_payload.encode("utf-8")
+                if isinstance(safe_payload, str)
+                else json.dumps(safe_payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            )
+            request.stream = httpx.ByteStream(safe_body)
+            request._content = safe_body
+            request.headers["content-length"] = str(len(safe_body))
 
     return scan
 

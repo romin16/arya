@@ -35,6 +35,8 @@ Weather uses Open-Meteo geocoding and forecast APIs. If a request lacks a locati
 
 Policy marks Gmail send/reply/trash, Calendar delete, and Contact delete as `ask`. The Phase 6 approval graph is not implemented yet, so those adapters refuse the call with a clear message and do not contact Google. Draft creation and non-destructive reads/updates remain available according to `config/policy.yaml`. Only Gmail, Calendar, and Contacts tools are exposed to the agent; upstream Drive, shared-file, and Tasks tools are filtered out.
 
+Outbound model payloads re-tokenize genuine email addresses and phone numbers before sending. `PII_EGRESS_STRICT=1` makes the guard fail closed; pytest sets this flag for CI and regression runs. Reserved example-domain addresses and obvious placeholder numbers are ignored. PII diagnostics record the kind, payload location, path, and a short hash, never the value.
+
 ## Manual checks
 
 - Confirm the launcher reports all four processes healthy.

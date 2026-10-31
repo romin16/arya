@@ -76,7 +76,7 @@ async def chat(req: ChatRequest):
             async for event in runtime.stream_turn(req, session_id):
                 yield encode_event(event)
         except Exception:
-            logger.error("Core chat turn failed")
+            logger.exception("Core chat turn failed")
             yield encode_event({"chunk": "I couldn't reach my assistant services just now."})
             yield encode_event({"activity": {"event": "Error", "message": "Core service unavailable"}})
         yield encode_event({"done": True})

@@ -5,6 +5,16 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from core.mcp_adapters.tools import MCPToolAdapter
+from core.pii.egress import sanitize_tool_schema
+
+
+def _server_schema(tool: Any) -> dict | None:
+    schema = getattr(tool, "args_schema", None)
+    if isinstance(schema, dict):
+        return schema
+    if isinstance(schema, type) and issubclass(schema, BaseModel):
+        return schema.model_json_schema()
+    return None
 
 
 class DeleteEmailArgs(BaseModel):
@@ -88,15 +98,21 @@ def adapt_google_tools(
     for raw in raw_tools:
         if raw.name not in GOOGLE_EXPOSED_SOURCES:
             continue
+        description, schema = sanitize_tool_schema(
+            raw.name,
+            raw.description or raw.name,
+            _server_schema(raw),
+        )
         adapter = MCPToolAdapter(
             public_name=next(
                 (name for name, source in GOOGLE_TOOL_SOURCES.items() if source == raw.name),
                 f"google_{raw.name}",
             ),
             source_tool=raw,
-            description=f"Google Workspace MCP tool: {raw.description or raw.name}",
+            description=f"Google Workspace MCP tool: {description}",
             timeout_seconds=timeout_seconds,
             retries=retries,
+            args_schema=schema,
         )
         tools[adapter.public_name] = adapter.as_langchain_tool()
 
@@ -121,8 +137,15 @@ def adapt_google_tools(
             description = "Reply in the existing Gmail thread. Requires approval (currently disabled)."
         else:
             transform = None
-            schema = None
-            description = raw.description if raw else f"Google Workspace tool {public_name}."
+            if raw:
+                description, schema = sanitize_tool_schema(
+                    raw.name,
+                    raw.description or raw.name,
+                    _server_schema(raw),
+                )
+            else:
+                schema = None
+                description = f"Google Workspace tool {public_name}."
         adapter = MCPToolAdapter(
             public_name=public_name,
             source_tool=raw,
