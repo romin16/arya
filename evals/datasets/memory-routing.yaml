@@ -1,12 +1,57 @@
-- utterance: What is my current salary?
+- id: current_salary
   operation: entity_read
-- utterance: What did we decide last April?
+  utterances:
+    - What is my current salary?
+    - How much do I earn right now?
+    - What salary do you have saved for me?
+  negatives:
+    - What is the average salary for a Python developer?
+    - Explain how salaries are benchmarked.
+- id: past_decision
   operation: episode_read
-- utterance: How does a SIP work?
+  store: episode
+  utterances:
+    - What did we decide last April?
+    - Remind me what we agreed on in April.
+    - What was our decision from April?
+  negatives:
+    - What should we decide today?
+    - Give me a new recommendation for this year.
+- id: general_knowledge
   operation: knowledge_read
-- utterance: I just changed jobs to TCS
+  store: knowledge
+  utterances:
+    - How does a SIP work?
+    - Explain systematic investment plans.
+    - What is the basic idea behind investing through a SIP?
+  negatives:
+    - What did I tell you about my SIP last week?
+    - Which investment plan did I choose?
+- id: entity_update
   operation: entity_update_and_episode_write
-- utterance: Never recommend equity to me again
+  utterances:
+    - I just changed jobs to TCS.
+    - I now work at TCS.
+    - "Update this: my new employer is TCS."
+  negatives:
+    - What is TCS?
+    - Find general information about TCS.
+- id: standing_rule
   operation: procedural_write
-- utterance: I'm worried about market volatility
+  utterances:
+    - Never recommend equity to me again.
+    - Going forward, don't suggest stocks for me.
+    - "Please remember as a rule: do not recommend equity."
+  negatives:
+    - What is equity investing?
+    - Compare equity funds with debt funds.
+- id: inferred_pattern
   operation: pattern_read
+  store: pattern
+  utterances:
+    - I'm worried about market volatility.
+    - I feel uneasy when markets swing this much.
+    - Market fluctuations are making me nervous.
+  negatives:
+    - Define market volatility.
+    - Show today's market volatility data.
