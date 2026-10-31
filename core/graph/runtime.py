@@ -30,6 +30,7 @@ from psycopg_pool import AsyncConnectionPool
 from pydantic import BaseModel, Field
 
 from core.graph.action_logger import latest_action_entries, persist_action_entries
+from core.memory.normalization import explicit_user_rules
 from core.memory.repositories import MemoryRepositories
 from core.memory.service import MemoryService
 from core.memory.policy_gate import hard_rule_for
@@ -148,6 +149,10 @@ class ARYAState(MessagesState, total=False):
     pending_operation_handled: bool
     memory_write_skip: bool
     memory_forget_message: str | None
+    route_label: str
+    procedural_write_message: str | None
+    chosen_tools: list[str]
+    procedural_tool_feedback: bool
     tool_rounds: int
 
 
@@ -301,6 +306,37 @@ def _forget_delete_reply(result: dict[str, Any]) -> str:
     if failed_items:
         parts.append("Failed:\n" + _forget_items_text(failed_items, field="reason"))
     return "\n".join(parts)
+
+
+def _is_standing_instruction(text: str) -> bool:
+    return bool(re.search(
+        r"\b(?:never|always|don't|do\s+not|from\s+now\s+on|going\s+forward|stop\s+doing)\b",
+        text,
+        re.I,
+    ))
+
+
+def _has_explicit_memory_forget_intent(text: str) -> bool:
+    if _is_standing_instruction(text):
+        return False
+    if re.search(r"\bforget\b", text, re.I):
+        return True
+    verbs = r"(?:delete|remove|clear|erase)"
+    memory_targets = r"(?:memory|memories|stored\s+(?:fact|rule|preference|episode|pattern)s?|(?:remembered\s+)?(?:fact|rule|preference|episode|pattern)s?)"
+    return bool(
+        re.search(rf"\b{verbs}\b.{{0,100}}\b{memory_targets}\b", text, re.I)
+        or re.search(rf"\b{memory_targets}\b.{{0,100}}\b{verbs}\b", text, re.I)
+        or re.search(rf"\b{verbs}\b.{{0,100}}\bfrom\s+(?:my\s+)?memory\b", text, re.I)
+    )
+
+
+def _turn_log_id(state: ARYAState) -> str:
+    message_id = next(
+        (message.id for message in reversed(state.get("messages", [])) if isinstance(message, HumanMessage)),
+        "unknown",
+    )
+    raw = f"{state.get('thread_id', '')}:{message_id}"
+    return hashlib.sha256(raw.encode("utf-8", errors="replace")).hexdigest()[:10]
 
 
 class CoreGraphRuntime:
@@ -461,7 +497,11 @@ class CoreGraphRuntime:
             "memory_forget": StructuredTool.from_function(
                 coroutine=self._memory_forget_tool,
                 name="memory_forget",
-                description="Preview matching memories, then delete only after the user confirms the listed items.",
+                description=(
+                    "Preview stored memories only when the user explicitly asks to forget, delete, remove, clear, "
+                    "or erase a remembered item. Never use for creating rules or handling general instructions. "
+                    "The tool only previews; confirmation is handled separately."
+                ),
                 args_schema=MemoryForgetArgs,
             ),
         }
@@ -697,6 +737,8 @@ class CoreGraphRuntime:
                 "pending_operation": None if clear else operation,
                 "memory_forget_message": reply,
                 "memory_write_skip": True,
+                "route_label": "pending_operation",
+                "chosen_tools": ["memory_forget" if operation["operation_type"] == "memory_forget" else "pending_operation"],
             }
 
         async def ingest(state: ARYAState) -> dict[str, Any]:
@@ -752,7 +794,26 @@ class CoreGraphRuntime:
             )
             likely = decision.likely_skills if isinstance(decision, RouteDecision) else decision.get("likely_skills", [])
             reads = decision.memory_reads if isinstance(decision, RouteDecision) else decision.get("memory_reads", [])
+            route_label = decision.memory_intent if isinstance(decision, RouteDecision) else decision.get("memory_intent", "none")
             active = self.skills.activate(likely)
+            procedural_write_message = None
+            memory_write_skip = False
+            current_user_text = _text_value(latest.content)
+            if route_label == "procedural_write":
+                parsed_rules = explicit_user_rules([current_user_text])
+                memory_write_skip = True
+                if self.memory is not None and parsed_rules:
+                    persisted = await self.memory.write_records(
+                        state["user_id"], state["thread_id"], {}, user_texts=[current_user_text],
+                        override_suppression=True,
+                    )
+                    if persisted.get("procedures", 0):
+                        display_rule = parsed_rules[0]["rule_text"].strip().rstrip(" .!?")
+                        procedural_write_message = f"Saved: {display_rule[0].lower() + display_rule[1:]}."
+                    else:
+                        procedural_write_message = "I didn't save that rule because it matches a recently forgotten item."
+                else:
+                    procedural_write_message = "I couldn't identify a direct standing instruction to save as a rule."
             if self.memory is not None:
                 always_task = self.memory.always_context_and_procedures(state["user_id"], token_budget=600)
                 routed_task = self.memory.routed_reads(state["user_id"], reads)
@@ -769,6 +830,9 @@ class CoreGraphRuntime:
                 "active_skills": active,
                 "memory_context": "\n".join(part for part in (always_context, routed, action_context) if part),
                 "procedures": procedures,
+                "route_label": route_label,
+                "procedural_write_message": procedural_write_message,
+                "memory_write_skip": memory_write_skip,
             }
 
         async def agent(state: ARYAState) -> dict[str, Any]:
@@ -819,12 +883,18 @@ class CoreGraphRuntime:
                 invalid_tool_calls=aggregate.invalid_tool_calls,
                 usage_metadata=aggregate.usage_metadata,
             )
-            if not response.tool_calls:
+            chosen_tools = list(state.get("chosen_tools", []))
+            selected_tools = [call["name"] for call in response.tool_calls]
+            if selected_tools:
+                chosen_tools.extend(selected_tools)
+            elif not chosen_tools:
+                chosen_tools.append("none")
+            if not response.tool_calls and not state.get("procedural_write_message"):
                 for chunk in chunks:
                     text = _text_value(chunk.content)
                     if text:
                         writer({"kind": "token", "text": text})
-            return {"messages": [response]}
+            return {"messages": [response], "chosen_tools": list(dict.fromkeys(chosen_tools))}
 
         async def tools(state: ARYAState) -> dict[str, Any]:
             writer = get_stream_writer()
@@ -858,6 +928,26 @@ class CoreGraphRuntime:
                         if name == "memory_search":
                             result = await self.memory.search(state["user_id"], str(safe_args.get("query", "")), date=safe_args.get("date"))
                         else:
+                            latest_user_text = _text_value(next(
+                                (message.content for message in reversed(messages) if isinstance(message, HumanMessage)),
+                                "",
+                            ))
+                            if not _has_explicit_memory_forget_intent(latest_user_text):
+                                content = _tool_content({
+                                    "success": False,
+                                    "error": (
+                                        "memory_forget requires an explicit request to forget, delete, remove, clear, "
+                                        "or erase a stored memory. No search or change was performed."
+                                    ),
+                                }, self.vault)
+                                results.append(ToolMessage(
+                                    content=content, name=name, tool_call_id=call["id"], status="error",
+                                ))
+                                writer({
+                                    "kind": "activity", "event": "Tool",
+                                    "message": "memory_forget rejected: no explicit memory deletion intent",
+                                })
+                                continue
                             result = await self.memory.forget(
                                 state["user_id"], str(safe_args.get("query", "")), confirm=False,
                             )
@@ -956,9 +1046,16 @@ class CoreGraphRuntime:
             )
             writer = get_stream_writer()
             writer({"kind": "activity", "event": "Tool", "message": "Action results recorded"})
+            return_tool_error = bool(
+                state.get("route_label") == "procedural_write"
+                and state.get("procedural_write_message")
+                and not state.get("procedural_tool_feedback")
+                and any(entry["tool"] == "memory_forget" and entry["status"] == "failed" for entry in entries)
+            )
             return {
                 "last_action": entries[-1] if entries else state.get("last_action"),
                 "tool_rounds": state.get("tool_rounds", 0) + 1,
+                "procedural_tool_feedback": return_tool_error,
             }
 
         async def cap_reached(state: ARYAState) -> dict[str, Any]:
@@ -967,6 +1064,11 @@ class CoreGraphRuntime:
             return {"messages": [AIMessage(content=message)]}
 
         async def respond(state: ARYAState) -> dict[str, Any]:
+            logger.info(
+                "chat_decision turn=%s route=%s tool=%s",
+                _turn_log_id(state), state.get("route_label", "none"),
+                ",".join(state.get("chosen_tools", [])) or "none",
+            )
             get_stream_writer()({
                 "kind": "activity",
                 "event": "Memory",
@@ -987,13 +1089,20 @@ class CoreGraphRuntime:
             get_stream_writer()({"kind": "token", "text": message})
             return {"messages": [AIMessage(content=message)], "memory_forget_message": None}
 
+        async def procedural_write_response(state: ARYAState) -> dict[str, Any]:
+            message = state.get("procedural_write_message") or "I couldn't save that instruction as a rule."
+            get_stream_writer()({"kind": "token", "text": message})
+            return {"messages": [AIMessage(content=message)], "procedural_write_message": None}
+
         def after_agent(state: ARYAState) -> str:
+            if state.get("procedural_tool_feedback"):
+                return "procedural_write"
             message = state["messages"][-1]
             if isinstance(message, AIMessage) and message.tool_calls:
                 if state.get("tool_rounds", 0) >= int(self.limits.get("max_tool_rounds", 8)):
                     return "cap_reached"
                 return "tools"
-            return "respond"
+            return "procedural_write" if state.get("procedural_write_message") else "respond"
 
         builder.add_node("ingest", ingest)
         builder.add_node("route", route)
@@ -1004,6 +1113,7 @@ class CoreGraphRuntime:
         builder.add_node("respond", respond)
         builder.add_node("refusal_response", refusal_response)
         builder.add_node("memory_forget_response", memory_forget_response)
+        builder.add_node("procedural_write_response", procedural_write_response)
         builder.add_edge(START, "pending_operation_gate")
         builder.add_conditional_edges(
             "pending_operation_gate",
@@ -1016,16 +1126,30 @@ class CoreGraphRuntime:
         builder.add_conditional_edges(
             "agent",
             after_agent,
-            {"tools": "tools", "respond": "respond", "cap_reached": "cap_reached"},
+            {
+                "tools": "tools", "respond": "respond", "cap_reached": "cap_reached",
+                "procedural_write": "procedural_write_response",
+            },
         )
         builder.add_edge("tools", "action_logger")
         builder.add_conditional_edges(
             "action_logger",
-            lambda state: "forget" if state.get("memory_forget_message") else ("refusal" if state.get("refusal_message") else "agent"),
-            {"forget": "memory_forget_response", "refusal": "refusal_response", "agent": "agent"},
+            lambda state: (
+                "procedure_feedback" if state.get("procedural_tool_feedback")
+                else "procedure" if state.get("procedural_write_message")
+                else "forget" if state.get("memory_forget_message")
+                else "refusal" if state.get("refusal_message")
+                else "agent"
+            ),
+            {
+                "procedure_feedback": "agent",
+                "procedure": "procedural_write_response", "forget": "memory_forget_response",
+                "refusal": "refusal_response", "agent": "agent",
+            },
         )
         builder.add_edge("refusal_response", "respond")
         builder.add_edge("memory_forget_response", "respond")
+        builder.add_edge("procedural_write_response", "respond")
         builder.add_edge("cap_reached", "respond")
         builder.add_edge("respond", END)
         return builder.compile(checkpointer=self.saver)
@@ -1045,6 +1169,9 @@ class CoreGraphRuntime:
             "user_id": user_id,
             "thread_id": session_id,
             "pending_operation": pending_operation,
+            "route_label": "none",
+            "chosen_tools": [],
+            "procedural_tool_feedback": False,
             "now_ist": "",
             "memory_context": "",
             "active_skills": [],

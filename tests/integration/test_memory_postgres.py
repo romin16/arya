@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import sys
 from pathlib import Path
@@ -11,7 +12,7 @@ from uuid import uuid4
 import psycopg
 import pytest
 from cryptography.fernet import Fernet
-from langchain_core.messages import AIMessageChunk, HumanMessage
+from langchain_core.messages import AIMessageChunk, HumanMessage, ToolMessage
 from langchain_core.tools import StructuredTool
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from psycopg.rows import dict_row
@@ -41,11 +42,20 @@ pytestmark = pytest.mark.skipif(
 
 
 class ScriptedRouter:
+    def __init__(self, intent="none"):
+        self.intent = intent
+
     async def ainvoke(self, messages):
-        return RouteDecision(memory_intent="none")
+        text = next((message.content for message in reversed(messages) if isinstance(message, HumanMessage)), "")
+        intent = self.intent if text.casefold().startswith("never") else "none"
+        return RouteDecision(memory_intent=intent)
 
 
 class ScriptedAgent:
+    def __init__(self, misroute_procedural=False):
+        self.misroute_procedural = misroute_procedural
+        self.chosen_tools = []
+
     def bind_tools(self, tools):
         self.bound_tools = tools
         return self
@@ -53,7 +63,21 @@ class ScriptedAgent:
     async def astream(self, messages):
         user_text = next(message.content for message in reversed(messages) if isinstance(message, HumanMessage))
         lowered = user_text.casefold()
-        if lowered.startswith("forget"):
+        if self.misroute_procedural and lowered.startswith("never"):
+            rejected = any(
+                isinstance(message, ToolMessage)
+                and message.name == "memory_forget"
+                and message.status == "error"
+                for message in messages
+            )
+            if rejected:
+                yield AIMessageChunk(content="I understand the memory tool was not allowed.")
+            else:
+                self.chosen_tools.append("memory_forget")
+                args = {"query": "Aditya", "confirm": False}
+                yield _memory_forget_call(args, "misrouted-procedural-forget")
+        elif lowered.startswith("forget"):
+            self.chosen_tools.append("memory_forget")
             args = {"query": "Aditya", "confirm": False}
             yield _memory_forget_call(args, "forget-preview")
         elif lowered.strip(" .!\n") in {"confirm", "yes"}:
@@ -173,7 +197,11 @@ async def _runtime(database_url: str, *, writer: ScriptedWriter, session: str):
             coroutine=runtime._memory_search_tool, name="memory_search", description="Search memory.",
         ),
         "memory_forget": StructuredTool.from_function(
-            coroutine=runtime._memory_forget_tool, name="memory_forget", description="Preview and forget memory.",
+            coroutine=runtime._memory_forget_tool, name="memory_forget",
+            description=(
+                "Preview stored memories only for an explicit forget, delete, remove, clear, or erase request. "
+                "Never use for creating a rule or handling general instructions."
+            ),
         ),
     }
     runtime.graph = runtime._build_graph()
@@ -273,7 +301,7 @@ async def test_pending_forget_wrong_text_reasks_and_expired_confirmation_does_no
         )
         await _turn(runtime, "Forget the rule about Aditya", user_id)
 
-        wrong_text, _ = await _turn(runtime, "That sounds fine", user_id)
+        wrong_text, _ = await _turn(runtime, "banana", user_id)
         assert "Reply ‘confirm’" in wrong_text
         assert len(await runtime.memory.repositories.active_procedures(user_token)) == 1
         assert await runtime.memory.repositories.get_pending_operation(user_token, session) is not None
@@ -294,6 +322,71 @@ async def test_pending_forget_wrong_text_reasks_and_expired_confirmation_does_no
                 (user_token, session),
             )).fetchall()
         assert [row["status"] for row in statuses] == ["no_op", "no_op"]
+    finally:
+        await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_procedural_route_beats_misrouted_forget_tool_and_full_confirm_flow(caplog):
+    database_url = os.environ["ARYA_TEST_DATABASE_URL"]
+    session = f"memory-procedural-guard-{uuid4().hex}"
+    user_id = f"memory-user-{uuid4().hex}"
+    writer = ScriptedWriter()
+    runtime = await _runtime(database_url, writer=writer, session=session)
+    runtime.router_model = ScriptedRouter(intent="procedural_write")
+    runtime.main_model = ScriptedAgent(misroute_procedural=True)
+    caplog.set_level(logging.INFO, logger="arya.core")
+    user_token = runtime.vault.tokenise(user_id)
+    forget_calls = []
+    original_forget = runtime.memory.forget
+
+    async def tracked_forget(*args, **kwargs):
+        forget_calls.append(args)
+        return await original_forget(*args, **kwargs)
+
+    runtime.memory.forget = tracked_forget
+    try:
+        saved, _ = await _turn(runtime, "Never message Aditya on WhatsApp again.", user_id)
+        assert saved == "Saved: never message Aditya on WhatsApp again."
+        assert runtime.main_model.chosen_tools == ["memory_forget"]
+        assert forget_calls == []
+        snapshot = await runtime.graph.aget_state({"configurable": {"thread_id": session}})
+        tool_results = [
+            message for message in snapshot.values["messages"]
+            if isinstance(message, ToolMessage) and message.name == "memory_forget"
+        ]
+        assert len(tool_results) == 1
+        assert "requires an explicit request" in tool_results[0].content
+        assert "No search or change was performed" in tool_results[0].content
+        rows = await runtime.memory.repositories.active_procedures(user_token)
+        assert len(rows) == 1
+        assert rows[0]["tool_pattern"] == "whatsapp_send"
+        assert rows[0]["argument_constraints"][0]["value"] == "Aditya"
+        assert await runtime.memory.repositories.get_pending_operation(user_token, session) is None
+
+        runtime.main_model = ScriptedAgent()
+        preview, _ = await _turn(runtime, "Forget the rule about Aditya", user_id)
+        assert "Found 1 matching memory item" in preview
+        wrong, _ = await _turn(runtime, "banana", user_id)
+        assert "Reply ‘confirm’" in wrong
+        assert len(await runtime.memory.repositories.active_procedures(user_token)) == 1
+
+        deleted, _ = await _turn(runtime, "confirm", user_id)
+        assert "Deleted 1 rule" in deleted
+        assert "0 failed" in deleted
+        assert await runtime.memory.repositories.active_procedures(user_token) == []
+        assert writer.calls == 0
+        assert forget_calls == [  # Only the explicit forget request searched.
+            (user_token, "Aditya"),
+        ]
+        await runtime.memory.write_records(
+            user_token, session, {}, user_texts=["Never message Aditya on WhatsApp again."],
+        )
+        assert await runtime.memory.repositories.active_procedures(user_token) == []
+        decisions = [record.getMessage() for record in caplog.records if record.getMessage().startswith("chat_decision ")]
+        assert len(decisions) == 4
+        assert any("route=procedural_write tool=memory_forget" in line for line in decisions)
+        assert all("Aditya" not in line for line in decisions)
     finally:
         await runtime.close()
 

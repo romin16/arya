@@ -124,7 +124,8 @@ class MemoryService:
         records: dict[str, Any],
         *,
         user_texts: list[str] | None = None,
-    ) -> None:
+        override_suppression: bool = False,
+    ) -> dict[str, int]:
         user_id = self.safe_text(user_id)
         user_texts = [self.safe_text(text) for text in (user_texts or [])]
         rule_records = explicit_user_rules(user_texts) + soft_user_rules(user_texts)
@@ -169,7 +170,7 @@ class MemoryService:
             item_fingerprint = fingerprint("procedure", {
                 "rule_text": rule_text, "tool_pattern": tool_pattern, "scope": rule.get("scope", "global"),
             })
-            if await self._is_suppressed(user_id, "procedure", item_fingerprint):
+            if not override_suppression and await self._is_suppressed(user_id, "procedure", item_fingerprint):
                 logger.info("memory_store_suppressed store=procedure fingerprint=%s", item_fingerprint[:10])
                 continue
             await self.repositories.add_procedure(

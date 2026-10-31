@@ -11,7 +11,12 @@ from langchain_core.messages import AIMessageChunk, HumanMessage, SystemMessage
 from langchain_core.tools import StructuredTool
 from langgraph.checkpoint.memory import MemorySaver
 
-from core.graph.runtime import CoreGraphRuntime, MemoryWrite, RouteDecision
+from core.graph.runtime import (
+    CoreGraphRuntime,
+    MemoryWrite,
+    RouteDecision,
+    _has_explicit_memory_forget_intent,
+)
 from core.memory.normalization import canonical_entity_key, explicit_user_rules
 from core.memory.policy_gate import hard_rule_for
 from core.pii.vault import PIIVault
@@ -50,6 +55,37 @@ def test_employment_and_workplace_aliases_share_canonical_entity_key():
     assert canonical_entity_key("employment") == "employer"
     assert canonical_entity_key("workplace") == "employer"
     assert canonical_entity_key("Company Name") == "employer"
+
+
+@pytest.mark.parametrize("text", [
+    "Never message Aditya on WhatsApp again.",
+    "Don't call the office after six.",
+    "Always ask before changing my calendar.",
+    "From now on, use short replies.",
+    "Stop doing that during meetings.",
+])
+def test_standing_instructions_are_never_forget_intent(text):
+    assert not _has_explicit_memory_forget_intent(text)
+
+
+@pytest.mark.parametrize("text", [
+    "Forget the rule about Aditya.",
+    "Delete the stored rule about Aditya.",
+    "Remove that preference from memory.",
+    "Clear my memory about this fact.",
+    "Erase the remembered pattern.",
+])
+def test_memory_forget_needs_explicit_forget_or_stored_memory_target(text):
+    assert _has_explicit_memory_forget_intent(text)
+
+
+@pytest.mark.parametrize("text", [
+    "Delete the email draft.",
+    "Clear my calendar.",
+    "Remove Aditya from the group.",
+])
+def test_non_memory_delete_requests_are_not_forget_intent(text):
+    assert not _has_explicit_memory_forget_intent(text)
 
 
 def test_memory_writer_schema_uses_typed_objects_supported_by_openai_strict_output():
