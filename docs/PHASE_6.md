@@ -1,6 +1,6 @@
 # Phase 6 — Policy, approvals, verifier, and taint
 
-Status: **B0–B2 verified; B3–B7 not implemented**.
+Status: **B0–B3 verified; B4–B7 not implemented**.
 
 ## B0 — LangGraph interrupt support
 
@@ -20,4 +20,8 @@ An `ask` batch is stored as a thread-bound `tool_approval` pending operation and
 
 PostgreSQL integration coverage verifies approved and rejected email actions, visible self-recipient/content, token-safe pending payloads, edit application and invalid-edit refusal, unclear re-asking, expiry, bundling, unrelated-command handling, and `/approve`. All tool calls in these tests are local mocks.
 
-B3 verifier, B4 injection taint, B5 caps, and B6–B7 launcher and end-to-end tests remain unimplemented.
+## B3 — reply verifier
+
+Final assistant text is held until a deterministic verifier checks action verbs against successful tool results and checks save/remember/forget claims against memory operations and retrieved context. Unsupported claims are regenerated once with tool calling disabled; if the corrected text still makes an unsupported claim, a fixed honest fallback is sent. The graph test mocks a failed WhatsApp call and an unsupported memory claim, and confirms both are regenerated once without another tool call.
+
+B4 injection taint, B5 caps, and B6–B7 launcher and end-to-end tests remain unimplemented.

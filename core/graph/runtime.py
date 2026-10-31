@@ -163,6 +163,7 @@ class ARYAState(MessagesState, total=False):
     procedural_tool_feedback: bool
     tool_rounds: int
     approval_resuming: bool
+    system_prompt: str
 
 
 def device_mcp_connection(device_token: str) -> dict[str, Any]:
@@ -301,6 +302,88 @@ def _approval_question(calls: list[dict[str, Any]], vault: PIIVault) -> str:
             action = f"Run {name} with {json.dumps(args, ensure_ascii=False, default=str)}?"
         actions.append("- " + action)
     return "Approve these actions?\n" + "\n".join(actions) + "\nReply yes or no."
+
+
+def _verified_tool_names(messages: list[Any]) -> set[str]:
+    results = {
+        message.tool_call_id: message
+        for message in messages if isinstance(message, ToolMessage)
+    }
+    successful = set()
+    for message in messages:
+        if not isinstance(message, AIMessage):
+            continue
+        for call in message.tool_calls:
+            result = results.get(call.get("id"))
+            if result is None or result.status == "error":
+                continue
+            content = result.content
+            try:
+                parsed = json.loads(content) if isinstance(content, str) else content
+            except (json.JSONDecodeError, TypeError):
+                parsed = None
+            if isinstance(parsed, dict):
+                if parsed.get("success") is False:
+                    continue
+                if parsed.get("outcome") in {"failed", "no_op"}:
+                    continue
+            successful.add(str(call.get("name", "")))
+    return successful
+
+
+def _unsupported_claims(reply: str, state: ARYAState) -> list[str]:
+    tools = _verified_tool_names(state.get("messages", []))
+    last_action = state.get("last_action") or {}
+    if last_action.get("status") in {"success", "succeeded"}:
+        tools.add(str(last_action.get("tool", "")))
+    checks = (
+        (r"\b(?:sent|emailed|delivered|messaged)\b", {"gmail_send", "gmail_reply", "whatsapp_send"}, "send"),
+        (r"\b(?:deleted|removed|trashed)\b", {
+            "gmail_delete", "calendar_delete", "calendar_delete_calendar", "contacts_delete", "memory_forget",
+        }, "delete"),
+        (r"\b(?:created|scheduled|added)\b", {
+            "calendar_create", "calendar_quick_add", "contacts_create", "gmail_draft",
+        }, "create"),
+        (r"\bupdated\b", {"calendar_update", "contacts_update", "calendar_move"}, "update"),
+        (r"\bpaused\b", {"spotify_pause"}, "pause"),
+        (r"\b(?:resumed|playing)\b", {"spotify_resume", "spotify_play"}, "play"),
+        (r"\bopened\b", {"open_app", "vscode_open", "vscode_open_file", "open_downloads", "open_documents"}, "open"),
+        (r"\bclosed\b", {"close_app"}, "close"),
+    )
+    issues = []
+    for pattern, allowed, label in checks:
+        match = re.search(pattern, reply, re.I)
+        if match is None or tools.intersection(allowed):
+            continue
+        prefix = reply[max(0, match.start() - 24):match.start()].casefold()
+        if re.search(r"\b(?:not|never|couldn't|could not|didn't|did not|wasn't|was not|failed to)\s*$", prefix):
+            continue
+        issues.append(label)
+    memory_tools = {"memory_search", "memory_forget"}.intersection(tools)
+    if re.search(r"\b(?:i(?:'ve| have)?\s+(?:saved|remembered))\b", reply, re.I):
+        if not memory_tools and not state.get("procedural_write_message"):
+            issues.append("memory")
+    remember_match = re.search(r"\bi remember(?: that)?\s+(.+)", reply, re.I)
+    if remember_match and not memory_tools:
+        memory_context = str(state.get("memory_context", "")).split(
+            "Last action details for references:", 1,
+        )[0].casefold()
+        claimed_words = re.findall(r"[a-z0-9]{5,}", remember_match.group(1).casefold())
+        if not memory_context or not any(word in memory_context for word in claimed_words):
+            issues.append("memory")
+    if re.search(r"\b(?:forgotten|deleted from memory|removed from memory)\b", reply, re.I):
+        forget_succeeded = False
+        for message in state.get("messages", []):
+            if not isinstance(message, ToolMessage) or message.name != "memory_forget":
+                continue
+            try:
+                payload = json.loads(message.content) if isinstance(message.content, str) else message.content
+            except (json.JSONDecodeError, TypeError):
+                payload = {}
+            forget_succeeded |= isinstance(payload, dict) and int(payload.get("deleted_count", 0)) > 0
+        if not forget_succeeded:
+            issues.append("memory_delete")
+    return list(dict.fromkeys(issues))
 
 
 def _forget_items_text(items: list[dict[str, Any]], *, field: str = "preview") -> str:
@@ -947,7 +1030,6 @@ class CoreGraphRuntime:
             }
 
         async def agent(state: ARYAState) -> dict[str, Any]:
-            writer = get_stream_writer()
             assert self.load_skill_tool is not None
             selected_names = self.skills.tool_names(state.get("active_skills", []))
             selected_tools = [self.tools[name] for name in sorted(selected_names) if name in self.tools]
@@ -1000,12 +1082,11 @@ class CoreGraphRuntime:
                 chosen_tools.extend(selected_tools)
             elif not chosen_tools:
                 chosen_tools.append("none")
-            if not response.tool_calls and not state.get("procedural_write_message"):
-                for chunk in chunks:
-                    text = _text_value(chunk.content)
-                    if text:
-                        writer({"kind": "token", "text": text})
-            return {"messages": [response], "chosen_tools": list(dict.fromkeys(chosen_tools))}
+            return {
+                "messages": [response],
+                "chosen_tools": list(dict.fromkeys(chosen_tools)),
+                "system_prompt": system_text,
+            }
 
         async def tools(state: ARYAState) -> dict[str, Any]:
             writer = get_stream_writer()
@@ -1278,6 +1359,47 @@ class CoreGraphRuntime:
             get_stream_writer()({"kind": "token", "text": message})
             return {"messages": [AIMessage(content=message)]}
 
+        async def verifier(state: ARYAState) -> dict[str, Any]:
+            reply_message = state["messages"][-1]
+            reply = _text_value(reply_message.content)
+            issues = _unsupported_claims(reply, state)
+            writer = get_stream_writer()
+            if not issues:
+                writer({"kind": "token", "text": reply})
+                return {"verification_passed": True}
+            logger.warning(
+                "reply_verification_regenerate turn=%s claims=%s",
+                _turn_log_id(state), ",".join(issues),
+            )
+            correction = (
+                "A deterministic verifier found unsupported claims in your previous draft: "
+                + ", ".join(issues)
+                + ". Rewrite it once using only the user request and successful tool results. "
+                "If an action did not succeed, say it did not succeed. If memory storage or retrieval is not "
+                "supported by the current memory context or tool result, do not claim to remember, save, or forget it. "
+                "Do not call tools and do not claim an unverified side effect."
+            )
+            prompt = [
+                SystemMessage(content=str(state.get("system_prompt", FIXED_RULES)) + "\n\n" + correction),
+                *state["messages"],
+            ]
+            regenerated = []
+            async for chunk in self.main_model.astream(prompt):
+                if getattr(chunk, "tool_call_chunks", None):
+                    continue
+                text = _text_value(chunk.content)
+                if text:
+                    regenerated.append(text)
+            safe_reply = "".join(regenerated).strip()
+            if not safe_reply or _unsupported_claims(safe_reply, state):
+                safe_reply = "I couldn't verify that action or memory claim, so I won't claim it happened."
+            writer({"kind": "token", "text": safe_reply})
+            corrected = AIMessage(
+                content=safe_reply,
+                id=reply_message.id or f"verified-{uuid4()}",
+            )
+            return {"messages": [corrected], "verification_passed": False}
+
         async def respond(state: ARYAState) -> dict[str, Any]:
             logger.info(
                 "chat_decision turn=%s route=%s tool=%s",
@@ -1317,7 +1439,7 @@ class CoreGraphRuntime:
                 if state.get("tool_rounds", 0) >= int(self.limits.get("max_tool_rounds", 8)):
                     return "cap_reached"
                 return "tools"
-            return "procedural_write" if state.get("procedural_write_message") else "respond"
+            return "procedural_write" if state.get("procedural_write_message") else "verify"
 
         builder.add_node("ingest", ingest)
         builder.add_node("route", route)
@@ -1325,6 +1447,7 @@ class CoreGraphRuntime:
         builder.add_node("tools", tools)
         builder.add_node("action_logger", action_logger)
         builder.add_node("cap_reached", cap_reached)
+        builder.add_node("verifier", verifier)
         builder.add_node("respond", respond)
         builder.add_node("refusal_response", refusal_response)
         builder.add_node("memory_forget_response", memory_forget_response)
@@ -1346,9 +1469,10 @@ class CoreGraphRuntime:
             after_agent,
             {
                 "tools": "tools", "respond": "respond", "cap_reached": "cap_reached",
-                "procedural_write": "procedural_write_response",
+                "procedural_write": "procedural_write_response", "verify": "verifier",
             },
         )
+        builder.add_edge("verifier", "respond")
         builder.add_edge("tools", "action_logger")
         builder.add_conditional_edges(
             "action_logger",

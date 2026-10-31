@@ -818,3 +818,70 @@ async def test_unrelated_message_rejects_pending_action_then_runs_as_new_turn():
         assert calls == []
     finally:
         await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_verifier_regenerates_unsupported_action_and_memory_claims_once():
+    database_url = os.environ["ARYA_TEST_DATABASE_URL"]
+    session = f"phase6-verifier-{uuid4().hex}"
+    user_id = f"memory-user-{uuid4().hex}"
+    class EmptyWriter:
+        async def ainvoke(self, messages):
+            return MemoryWrite()
+
+    runtime = await _runtime(database_url, writer=EmptyWriter(), session=session)
+    tool_calls = []
+
+    class Router:
+        async def ainvoke(self, messages):
+            return RouteDecision(likely_skills=["whatsapp"], memory_intent="none")
+
+    class ActionModel:
+        def __init__(self):
+            self.calls = 0
+
+        def bind_tools(self, tools):
+            self.bound_tools = tools
+            return self
+
+        async def astream(self, messages):
+            self.calls += 1
+            if self.calls == 1:
+                yield AIMessageChunk(content="", tool_call_chunks=[{
+                    "name": "whatsapp_send",
+                    "args": json.dumps({"contact": "Test Contact", "message": "Hi"}),
+                    "id": "verifier-send", "index": 0,
+                }])
+            elif self.calls == 2:
+                yield AIMessageChunk(content="I sent the message.")
+            elif self.calls == 3:
+                yield AIMessageChunk(content="The message was not sent because the tool failed.")
+            elif self.calls == 4:
+                yield AIMessageChunk(content="I remember that you prefer astronomy.")
+            else:
+                yield AIMessageChunk(content="I don't have that fact in the current memory context.")
+
+    async def failed_send(contact: str, message: str):
+        tool_calls.append((contact, message))
+        return {"success": False, "message": "mock failure"}
+
+    runtime.router_model = Router()
+    runtime.main_model = ActionModel()
+    runtime.tools = {"whatsapp_send": StructuredTool.from_function(
+        coroutine=failed_send, name="whatsapp_send", description="Mock send",
+    )}
+    runtime.device_tools = {}
+    runtime.policy = ToolPolicy({"tools": {"*": {"mode": "auto"}}}, {
+        "whatsapp_send", "load_skill", "memory_search", "memory_forget",
+    })
+    try:
+        action_reply, _ = await _turn(runtime, "Send a WhatsApp message to Test Contact", user_id)
+        assert action_reply == "The message was not sent because the tool failed."
+        assert runtime.main_model.calls == 3  # initial tool, unsupported draft, one correction
+        assert tool_calls == [("Test Contact", "Hi")]
+
+        memory_reply, _ = await _turn(runtime, "What do I usually prefer?", user_id)
+        assert memory_reply == "I don't have that fact in the current memory context."
+        assert runtime.main_model.calls == 5
+    finally:
+        await runtime.close()
