@@ -233,7 +233,7 @@ async def test_graph_forget_confirm_tombstone_dedup_and_writer_suppression():
     try:
         rule = "Never message Aditya on WhatsApp again."
         first, _ = await _turn(runtime, rule, user_id)
-        assert first == "Saved for this test."
+        assert first == "Saved: never message Aditya on WhatsApp again."
 
         user_token = runtime.vault.tokenise(user_id)
         entities = await runtime.memory.repositories.current_entities(user_token)
@@ -263,7 +263,7 @@ async def test_graph_forget_confirm_tombstone_dedup_and_writer_suppression():
         assert "Deleted 1 rule" in confirmation
         assert "0 failed" in confirmation
         assert len(await runtime.memory.repositories.active_procedures(user_token)) == 0
-        assert writer.calls == 1  # Both forget turns skipped memory extraction.
+        assert writer.calls == 0  # The rule was stored deterministically; both forget turns skipped extraction.
         assert await runtime.memory.repositories.get_pending_operation(user_token, session) is None
 
         await runtime.memory.write_records(

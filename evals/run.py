@@ -15,7 +15,8 @@ async def evaluate_memory_routing(router, dataset: list[dict]):
         "Route each request with one memory_intent and any necessary memory_reads. Choose exactly one intent: "
         "entity_read (a question about a stored current fact), episode_read (a past event or decision), "
         "knowledge_read (general reference knowledge), entity_update_and_episode_write (a user reports a durable current-fact update), "
-        "procedural_write (an explicit standing instruction), pattern_read (recall a stated recurring preference or behavior), "
+        "procedural_write (an explicit standing instruction), memory_forget (an explicit request to forget/delete/remove/clear/erase stored memory), "
+        "pattern_read (recall a stated recurring preference or behavior), "
         "or none (no personal memory read or write). memory_reads may contain only episode, knowledge, or pattern. "
         "For episode/knowledge/pattern reads, include a concise search query in memory_reads. For entity reads and writes, "
         "use the always-injected current entity store and return no routed read. Never infer personal facts from a general question.\n\n"
@@ -25,6 +26,8 @@ async def evaluate_memory_routing(router, dataset: list[dict]):
         "User: How does a SIP work? => knowledge_read, one knowledge read.\n"
         "User: I just changed jobs to TCS. => entity_update_and_episode_write, no routed read.\n"
         "User: Never recommend equity to me again. => procedural_write, no routed read.\n"
+        "User: Forget the rule about Aditya. => memory_forget, no routed read.\n"
+        "User: Delete the email draft. => none.\n"
         "User: I'm worried about market volatility. => pattern_read, one pattern read.\n"
         "User: What is the average salary for a Python developer? => none.\n"
         "User: What is equity investing? => none."
@@ -75,7 +78,10 @@ async def _live_memory_routing(dataset: list[dict]):
     settings = yaml.safe_load((root / "config" / "models.yaml").read_text(encoding="utf-8"))
     from core.graph.runtime import RouteDecision
 
-    router = ChatOpenAI(model=settings["aux"], api_key=api_key).with_structured_output(RouteDecision)
+    router = ChatOpenAI(
+        model=settings["aux"], api_key=api_key, temperature=0,
+        max_completion_tokens=512, timeout=30, max_retries=1,
+    ).with_structured_output(RouteDecision)
     return await evaluate_memory_routing(router, dataset)
 
 

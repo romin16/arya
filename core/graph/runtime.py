@@ -68,7 +68,7 @@ class RouteDecision(BaseModel):
     memory_reads: list["MemoryRead"] = Field(default_factory=list)
     memory_intent: Literal[
         "entity_read", "episode_read", "knowledge_read", "entity_update_and_episode_write",
-        "procedural_write", "pattern_read", "none",
+        "procedural_write", "memory_forget", "pattern_read", "none",
     ]
 
 
@@ -322,12 +322,29 @@ def _has_explicit_memory_forget_intent(text: str) -> bool:
     if re.search(r"\bforget\b", text, re.I):
         return True
     verbs = r"(?:delete|remove|clear|erase)"
-    memory_targets = r"(?:memory|memories|stored\s+(?:fact|rule|preference|episode|pattern)s?|(?:remembered\s+)?(?:fact|rule|preference|episode|pattern)s?)"
+    memory_targets = r"(?:memory|memories|stored\s+(?:fact|rule|preference|episode|pattern)s?|(?:remembered\s+)?(?:fact|rule|preference|episode|pattern)s?|info(?:rmation)?|what\s+you\s+know|what\s+i\s+told\s+you|what\s+i\s+shared)"
     return bool(
         re.search(rf"\b{verbs}\b.{{0,100}}\b{memory_targets}\b", text, re.I)
         or re.search(rf"\b{memory_targets}\b.{{0,100}}\b{verbs}\b", text, re.I)
         or re.search(rf"\b{verbs}\b.{{0,100}}\bfrom\s+(?:my\s+)?memory\b", text, re.I)
     )
+
+
+def _extract_forget_query(text: str) -> str | None:
+    text = " ".join(text.split()).strip(" .!?;:")
+    patterns = (
+        r"\b(?:what\s+you\s+know|what\s+i\s+told\s+you|what\s+i\s+shared)\s+about\s+(.+)$",
+        r"\b(?:forget|delete|remove|clear|erase)\s+(?:the|that|this|my|all|any)?\s*(?:stored\s+)?(?:memory|memories|rule|fact|information|info|preference|episode|pattern)\s+(?:about|for|of|on|regarding)\s+(.+)$",
+        r"\b(?:clear|delete|remove|erase)\s+(?:my\s+)?(.+?)\s+(?:info|information|memory|memories)\b",
+        r"\b(?:forget|delete|remove|clear|erase)\s+(?:about\s+)?(.+)$",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text, re.I)
+        if match:
+            query = match.group(1).strip(" .!?;:'\"`")
+            if query and not re.fullmatch(r"(?:the|that|this|my|all|any)?\s*(?:memory|rule|info|information|it|that|this)", query, re.I):
+                return query
+    return None
 
 
 def _turn_log_id(state: ARYAState) -> str:
@@ -778,12 +795,13 @@ class CoreGraphRuntime:
                 "Use episode for past decisions/events (include an ISO date when the user gives one), knowledge for general reference, "
                 "and pattern for inferred tendencies. Use no memory reads when unnecessary. "
                 "Classify the memory intent as entity_read, episode_read, knowledge_read, entity_update_and_episode_write, "
-                "procedural_write, pattern_read, or none. A current-fact question is entity_read; an explicit job/fact update "
+                "procedural_write, memory_forget, pattern_read, or none. Use memory_forget only for explicit memory deletion intent; instructions are procedural_write. A current-fact question is entity_read; an explicit job/fact update "
                 "is entity_update_and_episode_write; an explicit standing rule is procedural_write. "
                 "Examples: 'What is my current salary?' => entity_read, no routed read; 'What did we decide last April?' "
                 "=> episode_read and a date-filtered episode read; 'How does a SIP work?' => knowledge_read and a knowledge read; "
                 "'I just changed jobs to TCS' => entity_update_and_episode_write; 'Never recommend equity to me again' "
-                "=> procedural_write; 'I'm worried about market volatility' => pattern_read and a pattern read; "
+                "=> procedural_write; 'Forget the rule about Aditya' => memory_forget; 'I'm worried about market volatility' => pattern_read and a pattern read; "
+                "'Delete the email draft' => none; "
                 "'What is the average salary for a Python developer?' => none. "
                 "If the request is a short reference such as 'pause it' or 'do it again', use the prior last_action context "
                 "to resolve the reference. Never invent memory facts.\n\n"
@@ -794,11 +812,48 @@ class CoreGraphRuntime:
             )
             likely = decision.likely_skills if isinstance(decision, RouteDecision) else decision.get("likely_skills", [])
             reads = decision.memory_reads if isinstance(decision, RouteDecision) else decision.get("memory_reads", [])
-            route_label = decision.memory_intent if isinstance(decision, RouteDecision) else decision.get("memory_intent", "none")
+            model_route = decision.memory_intent if isinstance(decision, RouteDecision) else decision.get("memory_intent", "none")
+            current_user_text = _text_value(latest.content)
+            if _has_explicit_memory_forget_intent(current_user_text):
+                route_label = "memory_forget"
+            elif re.match(r"^\s*(?:please\s+)?(?:never|always|don't|do\s+not|from\s+now\s+on|going\s+forward|stop\s+doing)\b", current_user_text, re.I):
+                route_label = "procedural_write"
+            else:
+                route_label = "none" if model_route == "memory_forget" else model_route
             active = self.skills.activate(likely)
             procedural_write_message = None
             memory_write_skip = False
-            current_user_text = _text_value(latest.content)
+            if route_label == "memory_forget":
+                memory_write_skip = True
+                query = _extract_forget_query(current_user_text)
+                if query and self.memory is not None:
+                    query = self.vault.tokenise(query)
+                    result = await self.memory.forget(state["user_id"], query)
+                    candidates = result.get("will_delete", [])
+                    if candidates:
+                        await self.memory.repositories.set_pending_operation(
+                            state["user_id"], state["thread_id"], "memory_forget",
+                            {"items": candidates}, ttl_seconds=self.pending_operation_ttl_seconds,
+                        )
+                    memory_forget_message = _forget_preview_reply(result)
+                    result["outcome"] = "no_op"
+                    result["message"] = memory_forget_message
+                elif query:
+                    memory_forget_message = "Memory is unavailable. Nothing was searched or changed."
+                    result = {"outcome": "failed", "found_count": 0, "deleted_count": 0, "failed_count": 1}
+                else:
+                    memory_forget_message = "Which stored information should I preview? Nothing was searched or changed."
+                    result = {"outcome": "no_op", "found_count": 0, "deleted_count": 0, "failed_count": 0}
+                result["message"] = memory_forget_message
+                if self.pool is not None:
+                    await persist_action_entries(
+                        self.pool, user_id=state["user_id"], thread_id=state["thread_id"],
+                        entries=[{"tool": "memory_forget", "args": {"query": query or ""},
+                                  "status": result["outcome"],
+                                  "result_summary": json.dumps(result, ensure_ascii=False, default=str)}],
+                    )
+                return {"route_label": route_label, "chosen_tools": ["memory_forget"],
+                        "memory_forget_message": memory_forget_message, "memory_write_skip": True}
             if route_label == "procedural_write":
                 parsed_rules = explicit_user_rules([current_user_text])
                 memory_write_skip = True
@@ -1122,7 +1177,10 @@ class CoreGraphRuntime:
         )
         builder.add_node("pending_operation_gate", pending_operation_gate)
         builder.add_edge("ingest", "route")
-        builder.add_edge("route", "agent")
+        builder.add_conditional_edges(
+            "route", lambda state: "forget" if state.get("memory_forget_message") else "agent",
+            {"forget": "memory_forget_response", "agent": "agent"},
+        )
         builder.add_conditional_edges(
             "agent",
             after_agent,

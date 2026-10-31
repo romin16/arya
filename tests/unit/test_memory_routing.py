@@ -130,7 +130,7 @@ async def test_memory_routing_eval_uses_mock_structured_llm_for_paraphrases_and_
             return SimpleNamespace(memory_intent=intent, memory_reads=reads)
 
     results = await evaluate_memory_routing(MockRouter(), dataset)
-    assert len(results) == 30
+    assert len(results) == sum(len(case["utterances"]) + len(case.get("negatives", [])) for case in dataset)
     assert all(result["pass"] for result in results)
 
 
