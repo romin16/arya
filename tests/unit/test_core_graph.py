@@ -269,8 +269,25 @@ async def test_email_request_with_real_server_schemas_passes_strict_egress():
     pool = FakePool()
 
     class EmailRouter:
+        calls = 0
+
         async def ainvoke(self, messages):
-            return RouteDecision(likely_skills=["email"])
+            self.calls += 1
+            assert "Last action" in messages[0].content
+            return RouteDecision(
+                likely_skills=["email"],
+                memory_reads=[{"store": "episode", "query": "prior email request"}],
+            )
+
+    class FakeMemory:
+        async def always_context_and_procedures(self, user_id, *, token_budget):
+            assert user_id.startswith("user-test")
+            assert token_budget == 600
+            return "Current employer: [EMAIL_abcdef]", []
+
+        async def routed_reads(self, user_id, reads):
+            assert reads[0].store == "episode"
+            return "Previous email preference: brief messages"
 
     class CapturingModel:
         def __init__(self):
@@ -302,6 +319,7 @@ async def test_email_request_with_real_server_schemas_passes_strict_egress():
             assert account_token in system_text
             assert raw_account not in system_text
             assert "myself" in system_text
+            assert "Previous email preference" in system_text
             assert self.calls == 1
             yield AIMessageChunk(
                 content="",
@@ -323,6 +341,7 @@ async def test_email_request_with_real_server_schemas_passes_strict_egress():
     runtime.saver = MemorySaver()
     runtime.skills = SkillsRuntime(Path(__file__).resolve().parents[2] / "skills")
     runtime.router_model = EmailRouter()
+    runtime.memory = FakeMemory()
     model = CapturingModel()
     runtime.main_model = model
     runtime.tools = google_tools

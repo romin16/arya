@@ -5,10 +5,11 @@ import asyncio
 import json
 import logging
 import os
+import re
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from zoneinfo import ZoneInfo
 from uuid import uuid4
 
@@ -18,7 +19,7 @@ import yaml
 from dotenv import load_dotenv
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import StructuredTool
-from langchain_openai import ChatOpenAI
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.config import get_stream_writer
@@ -28,6 +29,9 @@ from psycopg_pool import AsyncConnectionPool
 from pydantic import BaseModel, Field
 
 from core.graph.action_logger import latest_action_entries, persist_action_entries
+from core.memory.repositories import MemoryRepositories
+from core.memory.service import MemoryService
+from core.memory.policy_gate import hard_rule_for
 from core.mcp_adapters.google_workspace import (
     GOOGLE_REQUIRED_SOURCES,
     adapt_google_tools,
@@ -59,7 +63,34 @@ logger = logging.getLogger("arya.core")
 
 class RouteDecision(BaseModel):
     likely_skills: list[str] = Field(default_factory=list)
-    memory_reads: list[str] = Field(default_factory=list)
+    memory_reads: list["MemoryRead"] = Field(default_factory=list)
+    memory_intent: Literal[
+        "entity_read", "episode_read", "knowledge_read", "entity_update_and_episode_write",
+        "procedural_write", "pattern_read", "none",
+    ] = "none"
+
+
+class MemoryRead(BaseModel):
+    store: Literal["episode", "knowledge", "pattern"]
+    query: str
+    date: str | None = None
+
+
+class MemoryWrite(BaseModel):
+    entities: list[dict[str, Any]] = Field(default_factory=list)
+    procedures: list[dict[str, Any]] = Field(default_factory=list)
+    episode: dict[str, Any] | None = None
+    patterns: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class MemorySearchArgs(BaseModel):
+    query: str = Field(description="What to recall from past conversations or stored knowledge")
+    date: str | None = Field(default=None, description="Optional ISO date filter for past episodes")
+
+
+class MemoryForgetArgs(BaseModel):
+    query: str = Field(description="Which remembered facts, rules, patterns, or episodes to forget")
+    confirm: bool = Field(default=False, description="True only after the user reviews and confirms the preview list")
 
 
 class LoadSkillArgs(BaseModel):
@@ -76,6 +107,7 @@ class ARYAState(MessagesState, total=False):
     tainted: bool
     pending_approval: Any
     refusal_message: str | None
+    pending_forget: list[dict[str, Any]] | None
     tool_rounds: int
 
 
@@ -211,6 +243,12 @@ class CoreGraphRuntime:
         self.limits: dict[str, Any] = {}
         self.persona = ""
         self.load_skill_tool: StructuredTool | None = None
+        self.memory: MemoryService | None = None
+        self.memory_writer_model: Any = None
+        self.memory_tools: dict[str, Any] = {}
+        self.embedding_model: OpenAIEmbeddings | None = None
+        self.background_tasks: set[asyncio.Task] = set()
+        self.scheduler = None
 
     async def start(self) -> None:
         load_dotenv(ROOT / ".env")
@@ -218,6 +256,7 @@ class CoreGraphRuntime:
         token = os.getenv("DEVICE_TOKEN", "")
         google_token = os.getenv("GOOGLE_MCP_TOKEN", "")
         api_key = os.getenv("OPENAI_API_KEY", "")
+        user_id = os.getenv("ARYA_USER_ID", "arya-local")
         if not database_url:
             raise RuntimeError("DATABASE_URL is required")
         if not api_key:
@@ -233,6 +272,7 @@ class CoreGraphRuntime:
         )
         self.persona = (ROOT / "persona.md").read_text(encoding="utf-8").strip()
         self.vault = _load_vault(database_url)
+        self.user_id = self.vault.tokenise(user_id)
         authorized_account = os.getenv("GOOGLE_ACCOUNT", "").strip()
         self.authorized_account_token = (
             self.vault.tokenise(authorized_account) if authorized_account else ""
@@ -248,6 +288,14 @@ class CoreGraphRuntime:
         await self.pool.open(wait=True)
         self.saver = AsyncPostgresSaver(self.pool)
         await self.saver.setup()
+        self.embedding_model = OpenAIEmbeddings(
+            model=model_settings.get("embedding", "text-embedding-3-small"),
+            api_key=api_key,
+        )
+        async def embed_query(text: str) -> list[float]:
+            safe_text = self.vault.tokenise(text)
+            return await self.embedding_model.aembed_query(safe_text)
+        self.memory = MemoryService(MemoryRepositories(self.pool), self.vault, embed_query)
 
         mcp_config = yaml.safe_load((ROOT / "config" / "mcp_servers.yaml").read_text(encoding="utf-8"))
         google_config = mcp_config["servers"]["google_workspace"]
@@ -311,6 +359,21 @@ class CoreGraphRuntime:
             max_completion_tokens=int(self.limits["token_budget"]),
         )
         self.router_model = auxiliary.with_structured_output(RouteDecision)
+        self.memory_writer_model = auxiliary.with_structured_output(MemoryWrite)
+        self.memory_tools = {
+            "memory_search": StructuredTool.from_function(
+                coroutine=self._memory_search_tool,
+                name="memory_search",
+                description="Search stored facts, past episodes, knowledge, and patterns.",
+                args_schema=MemorySearchArgs,
+            ),
+            "memory_forget": StructuredTool.from_function(
+                coroutine=self._memory_forget_tool,
+                name="memory_forget",
+                description="Preview matching memories, then delete only after the user confirms the listed items.",
+                args_schema=MemoryForgetArgs,
+            ),
+        }
         self.load_skill_tool = StructuredTool.from_function(
             coroutine=self._load_skill_tool,
             name="load_skill",
@@ -318,8 +381,14 @@ class CoreGraphRuntime:
             args_schema=LoadSkillArgs,
         )
         self.graph = self._build_graph()
+        self.scheduler = self._start_memory_scheduler(self.user_id)
 
     async def close(self) -> None:
+        if self.scheduler is not None:
+            self.scheduler.shutdown(wait=False)
+            self.scheduler = None
+        for task in list(self.background_tasks):
+            task.cancel()
         if self.http_client is not None:
             await self.http_client.aclose()
             self.http_client = None
@@ -335,6 +404,62 @@ class CoreGraphRuntime:
     async def _load_skill_tool(self, name: str) -> str:
         body, _ = self.skills.load(name, [])
         return body
+
+    async def _memory_search_tool(self, query: str, date: str | None = None):
+        raise RuntimeError("memory_search is executed by the graph tool adapter")
+
+    async def _memory_forget_tool(self, query: str, confirm: bool = False):
+        raise RuntimeError("memory_forget is executed by the graph tool adapter")
+
+    def _start_memory_scheduler(self, user_id: str):
+        from apscheduler.schedulers.asyncio import AsyncIOScheduler
+
+        scheduler = AsyncIOScheduler(timezone="Asia/Kolkata")
+        scheduler.add_job(
+            self._nightly_memory_consolidation,
+            "cron",
+            hour=3,
+            minute=15,
+            args=[user_id],
+            id="arya-memory-consolidation",
+            replace_existing=True,
+        )
+        scheduler.start()
+        return scheduler
+
+    async def _nightly_memory_consolidation(self, user_id: str):
+        try:
+            if self.memory is not None:
+                await self.memory.repositories.consolidate(user_id)
+        except Exception:
+            logger.exception("Nightly memory consolidation failed")
+
+    async def _background_memory_write(self, state: ARYAState):
+        try:
+            if self.memory is None or self.memory_writer_model is None:
+                return
+            recent = state.get("messages", [])[-12:]
+            serialised = []
+            for message in recent:
+                role = "user" if isinstance(message, HumanMessage) else "assistant"
+                serialised.append({"role": role, "content": self.vault.tokenise(_text_value(message.content))})
+            extracted = await self.memory_writer_model.ainvoke([
+                SystemMessage(content=(
+                    "Extract only durable user facts, explicit standing rules, a concise episode, and well-supported patterns. "
+                    "Return empty fields when unsupported. All content is PII-tokenized; preserve tokens exactly. "
+                    "Never create a hard rule unless the user explicitly stated it as a standing rule."
+                )),
+                HumanMessage(content=json.dumps({"messages": serialised, "tools": latest_action_entries(recent)}, ensure_ascii=False)),
+            ])
+            records = extracted.model_dump() if isinstance(extracted, MemoryWrite) else extracted
+            await self.memory.write_records(state["user_id"], state["thread_id"], records)
+        except Exception:
+            logger.exception("Background memory_write failed")
+
+    def _queue_memory_write(self, state: ARYAState) -> None:
+        task = asyncio.create_task(self._background_memory_write(state), name="arya-memory-write")
+        self.background_tasks.add(task)
+        task.add_done_callback(self.background_tasks.discard)
 
     def _build_graph(self):
         if not self.vault or not self.main_model or not self.router_model or not self.saver:
@@ -372,16 +497,41 @@ class CoreGraphRuntime:
             writer({"kind": "activity", "event": "Query", "message": "Choosing relevant skills"})
             latest = state["messages"][-1]
             index = self.skills.index
+            last_action = state.get("last_action")
             prompt = (
-                "Choose up to three relevant skills from this index. Return an empty list for general requests. "
-                "memory_reads must be an empty list for now.\n\n" + index
+                "Choose up to three relevant skills, one memory intent, and memory reads for this request. "
+                "Use episode for past decisions/events (include an ISO date when the user gives one), knowledge for general reference, "
+                "and pattern for inferred tendencies. Use no memory reads when unnecessary. "
+                "Classify the memory intent as entity_read, episode_read, knowledge_read, entity_update_and_episode_write, "
+                "procedural_write, pattern_read, or none. A current-fact question is entity_read; an explicit job/fact update "
+                "is entity_update_and_episode_write; an explicit standing rule is procedural_write. "
+                "If the request is a short reference such as 'pause it' or 'do it again', use the prior last_action context "
+                "to resolve the reference. Never invent memory facts.\n\n"
+                f"Skill index:\n{index}\nLast action: {json.dumps(last_action, ensure_ascii=False) if last_action else 'none'}"
             )
             decision = await self.router_model.ainvoke(
                 [SystemMessage(content=prompt), HumanMessage(content=_text_value(latest.content))]
             )
             likely = decision.likely_skills if isinstance(decision, RouteDecision) else decision.get("likely_skills", [])
+            reads = decision.memory_reads if isinstance(decision, RouteDecision) else decision.get("memory_reads", [])
             active = self.skills.activate(likely)
-            return {"active_skills": active, "memory_context": ""}
+            if self.memory is not None:
+                always_task = self.memory.always_context_and_procedures(state["user_id"], token_budget=600)
+                routed_task = self.memory.routed_reads(state["user_id"], reads)
+                (always_context, procedures), routed = await asyncio.gather(always_task, routed_task)
+            else:
+                always_context, procedures, routed = "", [], ""
+            action = last_action or {}
+            action_tool = action.get("tool") or action.get("name")
+            action_args = action.get("args", {})
+            action_context = ""
+            if action_tool:
+                action_context = f"Last action details for references: {json.dumps({'tool': action_tool, 'args': action_args}, ensure_ascii=False, default=str)}"
+            return {
+                "active_skills": active,
+                "memory_context": "\n".join(part for part in (always_context, routed, action_context) if part),
+                "procedures": procedures,
+            }
 
         async def agent(state: ARYAState) -> dict[str, Any]:
             writer = get_stream_writer()
@@ -393,6 +543,7 @@ class CoreGraphRuntime:
                 for name in ("web_search", "get_weather", "calculator")
                 if name in self.tools
             ]
+            always_tools.extend(self.memory_tools.values())
             model = self.main_model.bind_tools([self.load_skill_tool, *always_tools, *selected_tools])
             skill_context = self.skills.context(state.get("active_skills", []))
             last_action = state.get("last_action")
@@ -450,6 +601,7 @@ class CoreGraphRuntime:
             active_skills = list(state.get("active_skills", []))
             results: list[ToolMessage] = []
             refusal_message = None
+            pending_forget = state.get("pending_forget")
             timeout = float(self.limits.get("tool_timeout_seconds", 30))
             for call in assistant.tool_calls:
                 name = call["name"]
@@ -461,10 +613,34 @@ class CoreGraphRuntime:
                 status = "success"
                 try:
                     args = self.vault.detokenise_args(safe_args)
-                    if name == "load_skill":
+                    if name in {"memory_search", "memory_forget"}:
+                        if self.memory is None:
+                            raise RuntimeError("Memory service is unavailable")
+                        if name == "memory_search":
+                            result = await self.memory.search(state["user_id"], str(safe_args.get("query", "")), date=safe_args.get("date"))
+                        else:
+                            pending = state.get("pending_forget") or []
+                            user_text = _text_value(next((message.content for message in reversed(messages) if isinstance(message, HumanMessage)), ""))
+                            explicit = bool(re.fullmatch(r"\s*(yes|confirm|delete|forget|proceed|do it)\s*[.!]?\s*", user_text, re.I))
+                            if bool(safe_args.get("confirm")) and pending and explicit:
+                                deleted = await self.memory.repositories.delete_candidates(state["user_id"], pending)
+                                pending_forget = None
+                                result = {"deleted": deleted, "confirmation_required": False, "deleted_items": pending}
+                            else:
+                                result = await self.memory.forget(state["user_id"], str(safe_args.get("query", "")), confirm=False)
+                                pending_forget = result.get("will_delete", [])
+                    elif name == "load_skill":
                         body, active_skills = self.skills.load(args["name"], active_skills)
                         result: Any = body
                     else:
+                        blocked = hard_rule_for(name, safe_args, state.get("procedures", []))
+                        if blocked is not None:
+                            refusal_message = f"Blocked by a standing rule: {blocked.get('rule_text', 'hard rule')}. Nothing was changed."
+                            result = {"success": False, "policy_blocked": True, "message": refusal_message}
+                            content = _tool_content(result, self.vault)
+                            status = "success"
+                            results.append(ToolMessage(content=content, name=name, tool_call_id=call["id"], status=status))
+                            continue
                         tool = self.tools.get(name) or self.device_tools.get(name)
                         if tool is None or name not in self.skills.tool_names(active_skills):
                             if name not in {"web_search", "get_weather", "calculator"}:
@@ -511,6 +687,7 @@ class CoreGraphRuntime:
                 "messages": results,
                 "active_skills": active_skills,
                 "refusal_message": refusal_message,
+                **({"pending_forget": pending_forget} if "pending_forget" in locals() else {}),
             }
 
         async def action_logger(state: ARYAState) -> dict[str, Any]:
@@ -536,6 +713,7 @@ class CoreGraphRuntime:
 
         async def respond(state: ARYAState) -> dict[str, Any]:
             get_stream_writer()({"kind": "complete"})
+            self._queue_memory_write(state)
             return {}
 
         async def refusal_response(state: ARYAState) -> dict[str, Any]:
@@ -584,7 +762,7 @@ class CoreGraphRuntime:
         stream_detokenizer = StreamingDetokenizer(self.vault)
         input_state: ARYAState = {
             "messages": [HumanMessage(content=request.message, id=f"user-{uuid4()}")],
-            "user_id": request.user_id,
+            "user_id": self.vault.tokenise(request.user_id or getattr(self, "user_id", "arya-local")),
             "thread_id": session_id,
             "now_ist": "",
             "memory_context": "",
