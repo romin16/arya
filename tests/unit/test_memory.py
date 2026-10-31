@@ -72,8 +72,8 @@ async def test_memory_write_tokenizes_user_thread_and_every_value_before_storage
         "procedures": [{"rule_text": f"Never email {raw}", "scope": "global"}],
         "episode": {"summary": f"Met {raw}", "body": f"Contact: {raw}", "topics": [raw]},
         "patterns": [{"text": f"Often contacts {raw}"}],
-    })
-    assert len(calls) == 4
+    }, user_texts=[f"My contact email is {raw}.", f"Never email {raw}."])
+    assert len(calls) == 3
     assert raw not in repr(calls)
     assert raw not in repr(embedded)
     assert "[EMAIL_" in repr(calls)
@@ -99,5 +99,31 @@ async def test_memory_forget_only_previews_and_never_deletes():
     memory = MemoryService(repo, PIIVault(b"forget-hmac", Fernet.generate_key()), lambda text: None)
     preview = await memory.forget("user", "job", confirm=True)
     assert preview["will_delete"] == [{"store": "entities", "id": 7, "preview": "job"}]
-    assert preview["deleted"] == 0
+    assert preview["deleted_count"] == 0
     assert not repo.deleted
+
+
+@pytest.mark.asyncio
+async def test_casual_chat_does_not_become_a_hard_procedure():
+    class Repo:
+        def __init__(self):
+            self.procedures = []
+
+        async def add_procedure(self, *args, **kwargs):
+            self.procedures.append((args, kwargs))
+
+        async def upsert_entity(self, *args, **kwargs):
+            return None
+
+    repo = Repo()
+    memory = MemoryService(repo, PIIVault(b"casual-rule-hmac", Fernet.generate_key()), lambda text: None)
+    await memory.write_records("user", "thread", {
+        "procedures": [{"rule_text": "Never run out of tech talk at the water cooler", "severity": "hard"}],
+    }, user_texts=["Never run out of tech talk at the water cooler."])
+    assert repo.procedures == []
+
+    await memory.write_records("user", "thread", {}, user_texts=["I prefer you to keep replies brief."])
+    assert len(repo.procedures) == 1
+    assert repo.procedures[0][1]["severity"] == "soft"
+    assert repo.procedures[0][1]["confidence"] == 0.3
+    assert repo.procedures[0][1]["tool_pattern"] == "*"

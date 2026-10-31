@@ -23,7 +23,44 @@ CREATE INDEX IF NOT EXISTS kc_tsv ON knowledge_chunks USING gin(tsv);
 
 CREATE TABLE IF NOT EXISTS procedures (
  id bigserial PRIMARY KEY,user_id text NOT NULL,rule_text text NOT NULL,scope text DEFAULT 'global',
- tool_pattern text,severity text CHECK(severity IN ('hard','soft')),active boolean DEFAULT true,created_at timestamptz DEFAULT now());
+ tool_pattern text,severity text CHECK(severity IN ('hard','soft')),active boolean DEFAULT true,created_at timestamptz DEFAULT now(),
+ confidence real NOT NULL DEFAULT 0.3,argument_constraints jsonb NOT NULL DEFAULT '[]'::jsonb);
+ALTER TABLE procedures ADD COLUMN IF NOT EXISTS confidence real NOT NULL DEFAULT 0.3;
+ALTER TABLE procedures ADD COLUMN IF NOT EXISTS argument_constraints jsonb NOT NULL DEFAULT '[]'::jsonb;
+UPDATE procedures SET severity='soft',confidence=LEAST(confidence,0.3)
+ WHERE severity='hard'
+   AND rule_text !~* '^\s*(please\s+)?(remember(\s+as\s+a\s+rule)?[:,]?\s*)?(from\s+now\s+on[:,]?\s*|going\s+forward[:,]?\s*)?(never|do\s+not|don''t)\s+(message|text|contact|email|call|recommend|suggest|share|send|tell|mention|use|book|schedule)\b';
+UPDATE procedures SET
+ tool_pattern=CASE WHEN rule_text ~* '\b(call)\b.*\bwhatsapp\b' THEN 'whatsapp_voice_call' ELSE 'whatsapp_send' END,
+ argument_constraints=CASE
+   WHEN regexp_match(rule_text,'(?i)(?:message|text|contact)\s+(.+?)\s+(?:on|via)\s+whatsapp') IS NOT NULL
+   THEN jsonb_build_array(jsonb_build_object(
+     'argument','contact','operator','contains_casefold',
+     'value',btrim((regexp_match(rule_text,'(?i)(?:message|text|contact)\s+(.+?)\s+(?:on|via)\s+whatsapp'))[1])))
+   ELSE '[]'::jsonb
+ END
+ WHERE active=true AND coalesce(tool_pattern,'')=''
+   AND rule_text ~* '\bwhatsapp\b'
+   AND rule_text ~* '\b(message|text|contact|call|send)\b';
+WITH ranked AS (
+ SELECT id,row_number() OVER (
+   PARTITION BY user_id,lower(btrim(regexp_replace(regexp_replace(btrim(rule_text),'[^[:alnum:]_]+',' ','g'),'\s+',' ','g'))),
+                lower(coalesce(tool_pattern,'')),lower(btrim(coalesce(scope,'global')))
+   ORDER BY (severity='hard') DESC,confidence DESC,created_at,id
+ ) AS position
+ FROM procedures WHERE active=true
+)
+UPDATE procedures p SET active=false FROM ranked r WHERE p.id=r.id AND r.position>1;
+UPDATE entities e SET valid_to=now()
+ WHERE e.valid_to IS NULL
+   AND (e.key ~* '(^|_)(rule|procedure|policy)$'
+        OR EXISTS (
+          SELECT 1 FROM procedures p
+          WHERE p.user_id=e.user_id AND p.active=true AND p.rule_text ~* '\bwhatsapp\b'
+            AND ((length(btrim(e.key))>1 AND position(lower(btrim(e.key)) IN lower(p.rule_text))>0)
+                 OR (jsonb_typeof(e.value)='string' AND length(e.value #>> '{}')>1
+                     AND position(lower(e.value #>> '{}') IN lower(p.rule_text))>0))
+        ));
 CREATE TABLE IF NOT EXISTS patterns (
  id bigserial PRIMARY KEY,user_id text NOT NULL,text text NOT NULL,evidence_count int DEFAULT 1,
  confidence real,status text DEFAULT 'active',first_seen timestamptz DEFAULT now(),last_seen timestamptz DEFAULT now(),embedding vector(1536));
@@ -31,6 +68,17 @@ CREATE INDEX IF NOT EXISTS patterns_vec ON patterns USING hnsw(embedding vector_
 CREATE INDEX IF NOT EXISTS patterns_user_status ON patterns(user_id,status);
 CREATE INDEX IF NOT EXISTS entities_user_current ON entities(user_id,key) WHERE valid_to IS NULL;
 CREATE INDEX IF NOT EXISTS procedures_user_active ON procedures(user_id,active);
+CREATE UNIQUE INDEX IF NOT EXISTS procedures_active_identity
+ ON procedures(user_id,
+   (lower(btrim(regexp_replace(regexp_replace(btrim(rule_text),'[^[:alnum:]_]+',' ','g'),'\s+',' ','g')))),
+   (lower(coalesce(tool_pattern,''))),
+   (lower(btrim(coalesce(scope,'global'))))) WHERE active=true;
+CREATE TABLE IF NOT EXISTS memory_tombstones (
+ id bigserial PRIMARY KEY,user_id text NOT NULL,store text NOT NULL,
+ fingerprint text NOT NULL,normalized_content text NOT NULL,
+ created_at timestamptz NOT NULL DEFAULT now(),suppressed_until timestamptz NOT NULL);
+CREATE UNIQUE INDEX IF NOT EXISTS memory_tombstones_identity ON memory_tombstones(user_id,store,fingerprint);
+CREATE INDEX IF NOT EXISTS memory_tombstones_expiry ON memory_tombstones(user_id,suppressed_until);
 CREATE TABLE IF NOT EXISTS action_log (
  id bigserial PRIMARY KEY,user_id text NOT NULL,thread_id text,ts timestamptz DEFAULT now(),tool text,
  args jsonb,status text,result_summary text,approved_by text,duration_ms int);

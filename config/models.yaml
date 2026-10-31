@@ -7,3 +7,6 @@ limits:
   max_active_skills: 3
   token_budget: 12000
   tool_timeout_seconds: 30
+memory:
+  tombstone_suppression_days: 90
+  soft_procedure_confidence: 0.3

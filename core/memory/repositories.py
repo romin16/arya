@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 from collections import defaultdict
+import json
+import logging
 from typing import Any
 
 from psycopg.types.json import Jsonb
+from core.memory.normalization import fingerprint, normalize_text, parse_explicit_rule
+
+logger = logging.getLogger("arya.memory")
 
 
 def reciprocal_rank_fusion(*ranked_lists: list[dict[str, Any]], k: int = 60) -> list[dict[str, Any]]:
@@ -65,18 +70,69 @@ class MemoryRepositories:
     async def active_procedures(self, user_id: str) -> list[dict[str, Any]]:
         async with self.pool.connection() as conn:
             cur = await conn.execute(
-                "SELECT id,rule_text,scope,tool_pattern,severity FROM procedures WHERE user_id=%s AND active=true ORDER BY severity DESC,created_at",
+                "SELECT id,rule_text,scope,tool_pattern,severity,confidence,argument_constraints FROM procedures WHERE user_id=%s AND active=true ORDER BY severity DESC,created_at",
                 (user_id,),
             )
-            return list(await cur.fetchall())
+            rows = list(await cur.fetchall())
+            for row in rows:
+                if not row.get("tool_pattern"):
+                    derived = parse_explicit_rule(row["rule_text"])
+                    if derived and (derived.get("tool_pattern") or derived.get("argument_constraints")):
+                        row["tool_pattern"] = derived.get("tool_pattern")
+                        row["argument_constraints"] = derived.get("argument_constraints", [])
+                        await conn.execute(
+                            "UPDATE procedures SET tool_pattern=%s,argument_constraints=%s WHERE id=%s",
+                            (row["tool_pattern"], Jsonb(row["argument_constraints"]), row["id"]),
+                        )
+            return rows
 
-    async def add_procedure(self, user_id: str, rule_text: str, *, scope: str = "global", tool_pattern: str | None = None, severity: str = "soft") -> int:
+    async def add_procedure(
+        self,
+        user_id: str,
+        rule_text: str,
+        *,
+        scope: str = "global",
+        tool_pattern: str | None = None,
+        severity: str = "soft",
+        confidence: float = 0.3,
+        argument_constraints: list[dict[str, str]] | None = None,
+    ) -> int:
+        normalized_rule = normalize_text(rule_text)
+        normalized_pattern = normalize_text(tool_pattern or "")
+        normalized_scope = normalize_text(scope or "global")
         async with self.pool.connection() as conn:
-            cur = await conn.execute(
-                "INSERT INTO procedures(user_id,rule_text,scope,tool_pattern,severity) VALUES(%s,%s,%s,%s,%s) RETURNING id",
-                (user_id, rule_text, scope, tool_pattern, severity),
-            )
-            return (await cur.fetchone())["id"]
+            async with conn.transaction():
+                await conn.execute(
+                    "SELECT pg_advisory_xact_lock(hashtext(%s),hashtext(%s))",
+                    (user_id, normalized_rule + "|" + normalized_pattern + "|" + normalized_scope),
+                )
+                cur = await conn.execute(
+                    """SELECT id,severity,confidence,argument_constraints FROM procedures
+                       WHERE user_id=%s AND active=true
+                         AND lower(btrim(regexp_replace(regexp_replace(btrim(rule_text),'[^[:alnum:]_]+',' ','g'),'\\s+',' ','g')))=%s
+                         AND lower(coalesce(tool_pattern,''))=%s AND lower(btrim(coalesce(scope,'global')) )=%s
+                       FOR UPDATE""",
+                    (user_id, normalized_rule, normalized_pattern, normalized_scope),
+                )
+                existing = await cur.fetchone()
+                constraints = argument_constraints or []
+                if existing:
+                    merged = list(existing.get("argument_constraints") or [])
+                    known = {json.dumps(item, sort_keys=True) for item in merged}
+                    merged.extend(item for item in constraints if json.dumps(item, sort_keys=True) not in known)
+                    chosen_severity = "hard" if "hard" in {severity, existing["severity"]} else "soft"
+                    await conn.execute(
+                        """UPDATE procedures SET severity=%s,confidence=GREATEST(confidence,%s),argument_constraints=%s
+                           WHERE id=%s""",
+                        (chosen_severity, confidence, Jsonb(merged), existing["id"]),
+                    )
+                    return existing["id"]
+                cur = await conn.execute(
+                    """INSERT INTO procedures(user_id,rule_text,scope,tool_pattern,severity,confidence,argument_constraints)
+                       VALUES(%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
+                    (user_id, rule_text, scope, tool_pattern, severity, confidence, Jsonb(constraints)),
+                )
+                return (await cur.fetchone())["id"]
 
     async def add_episode(self, user_id: str, thread_id: str, summary: str, body: str, embedding: list[float], *, topics=None, tools_used=None):
         async with self.pool.connection() as conn:
@@ -188,27 +244,97 @@ class MemoryRepositories:
                 results.extend({"store": table, **row} for row in await cur.fetchall())
             return results
 
-    async def delete_candidates(self, user_id: str, candidates: list[dict[str, Any]]) -> int:
+    async def is_suppressed(self, user_id: str, store: str, item_fingerprint: str) -> bool:
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                "SELECT 1 FROM memory_tombstones WHERE user_id=%s AND store=%s AND fingerprint=%s AND suppressed_until>now()",
+                (user_id, store, item_fingerprint),
+            )
+            return await cur.fetchone() is not None
+
+    async def delete_candidates(self, user_id: str, candidates: list[dict[str, Any]], *, suppression_days: int = 90) -> dict[str, Any]:
         allowed = {"entities", "procedures", "patterns", "episodes"}
-        deleted = 0
+        deleted_items: list[dict[str, Any]] = []
+        failed_items: list[dict[str, Any]] = []
+        counts: dict[str, int] = defaultdict(int)
         async with self.pool.connection() as conn:
             for item in candidates:
                 table = item.get("store")
                 if table not in allowed:
+                    failed_items.append({**item, "reason": "unsupported memory store"})
                     continue
-                if table == "entities":
-                    cur = await conn.execute(
-                        "UPDATE entities SET valid_to=now() WHERE user_id=%s AND id=%s AND valid_to IS NULL",
-                        (user_id, item["id"]),
-                    )
-                elif table == "procedures":
-                    cur = await conn.execute("UPDATE procedures SET active=false WHERE user_id=%s AND id=%s", (user_id,item["id"]))
-                elif table == "patterns":
-                    cur = await conn.execute("UPDATE patterns SET status='deleted' WHERE user_id=%s AND id=%s", (user_id,item["id"]))
-                else:
-                    cur = await conn.execute("DELETE FROM episodes WHERE user_id=%s AND id=%s", (user_id,item["id"]))
-                deleted += cur.rowcount
-        return deleted
+                try:
+                    async with conn.transaction():
+                        if table == "entities":
+                            cur = await conn.execute(
+                                "SELECT key,value FROM entities WHERE user_id=%s AND id=%s AND valid_to IS NULL FOR UPDATE",
+                                (user_id, item["id"]),
+                            )
+                        elif table == "procedures":
+                            cur = await conn.execute(
+                                "SELECT rule_text,scope,tool_pattern,argument_constraints FROM procedures WHERE user_id=%s AND id=%s AND active=true FOR UPDATE",
+                                (user_id, item["id"]),
+                            )
+                        elif table == "patterns":
+                            cur = await conn.execute(
+                                "SELECT text FROM patterns WHERE user_id=%s AND id=%s AND status='active' FOR UPDATE",
+                                (user_id, item["id"]),
+                            )
+                        else:
+                            cur = await conn.execute(
+                                "SELECT summary,body FROM episodes WHERE user_id=%s AND id=%s FOR UPDATE",
+                                (user_id, item["id"]),
+                            )
+                        record = await cur.fetchone()
+                        if record is None:
+                            failed_items.append({**item, "reason": "item no longer exists"})
+                            continue
+                        singular = {"entities": "entity", "procedures": "procedure", "patterns": "pattern", "episodes": "episode"}[table]
+                        if table == "entities":
+                            payload = {"key": record["key"], "value": record["value"]}
+                            normalized_content = json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str)
+                        elif table == "procedures":
+                            payload = {key: record[key] for key in ("rule_text", "scope", "tool_pattern", "argument_constraints")}
+                            normalized_content = json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str)
+                        elif table == "patterns":
+                            payload = record["text"]
+                            normalized_content = payload
+                        else:
+                            payload = {"summary": record["summary"], "body": record["body"]}
+                            normalized_content = json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str)
+                        item_fingerprint = fingerprint(singular, payload)
+                        await conn.execute(
+                            """INSERT INTO memory_tombstones(user_id,store,fingerprint,normalized_content,suppressed_until)
+                               VALUES(%s,%s,%s,%s,now()+(%s*interval '1 day'))
+                               ON CONFLICT(user_id,store,fingerprint) DO UPDATE
+                               SET normalized_content=EXCLUDED.normalized_content,
+                                   suppressed_until=GREATEST(memory_tombstones.suppressed_until,EXCLUDED.suppressed_until)""",
+                            (user_id, singular, item_fingerprint, normalized_content, suppression_days),
+                        )
+                        if table == "entities":
+                            cur = await conn.execute("UPDATE entities SET valid_to=now() WHERE user_id=%s AND id=%s AND valid_to IS NULL", (user_id, item["id"]))
+                        elif table == "procedures":
+                            cur = await conn.execute("UPDATE procedures SET active=false WHERE user_id=%s AND id=%s AND active=true", (user_id, item["id"]))
+                        elif table == "patterns":
+                            cur = await conn.execute("UPDATE patterns SET status='deleted' WHERE user_id=%s AND id=%s AND status='active'", (user_id, item["id"]))
+                        else:
+                            cur = await conn.execute("DELETE FROM episodes WHERE user_id=%s AND id=%s", (user_id, item["id"]))
+                        if cur.rowcount != 1:
+                            raise RuntimeError("delete did not affect exactly one row")
+                    deleted_items.append(item)
+                    counts[table] += 1
+                except Exception as exc:
+                    logger.exception("memory_forget_delete_failed store=%s id=%s", table, item.get("id"))
+                    failed_items.append({**item, "reason": f"delete failed ({type(exc).__name__})"})
+        return {
+            "found_count": len(candidates),
+            "found_items": candidates,
+            "deleted_count": len(deleted_items),
+            "deleted_items": deleted_items,
+            "failed_count": len(failed_items),
+            "failed_items": failed_items,
+            "counts_by_store": dict(counts),
+        }
 
     async def consolidate(self, user_id: str):
         async with self.pool.connection() as conn:

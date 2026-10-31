@@ -5,16 +5,26 @@ import logging
 import re
 from typing import Any
 
+from core.memory.normalization import (
+    canonical_entity_key,
+    explicit_user_rules,
+    fingerprint,
+    is_recurring_first_person,
+    normalize_text,
+    split_sentences,
+    soft_user_rules,
+)
 from core.memory.repositories import MemoryRepositories
 
 logger = logging.getLogger("arya.memory")
 
 
 class MemoryService:
-    def __init__(self, repositories: MemoryRepositories, vault, embed_query):
+    def __init__(self, repositories: MemoryRepositories, vault, embed_query, *, tombstone_suppression_days: int = 90):
         self.repositories = repositories
         self.vault = vault
         self.embed_query = embed_query
+        self.tombstone_suppression_days = max(0, int(tombstone_suppression_days))
 
     def safe_text(self, text: str) -> str:
         return self.vault.tokenise(text)
@@ -35,7 +45,8 @@ class MemoryService:
         for procedure in procedures:
             rows.append(
                 f"{procedure['severity']} procedure [{procedure['scope']}]: {procedure['rule_text']} "
-                f"(tool pattern: {procedure['tool_pattern'] or '*'})"
+                f"(tool pattern: {procedure['tool_pattern'] or '*'}; "
+                f"argument constraints: {json.dumps(procedure.get('argument_constraints') or [], ensure_ascii=False)})"
             )
         text = "\n".join(rows)
         return text[: token_budget * 4], procedures
@@ -90,57 +101,117 @@ class MemoryService:
         safe_query = self.safe_text(query)
         candidates = await self.repositories.search_forget_candidates(user_id, safe_query)
         return {
-            "deleted": 0,
+            "found_count": len(candidates),
+            "found_items": candidates,
+            "deleted_count": 0,
+            "deleted_items": [],
+            "failed_count": 0,
+            "failed_items": [],
             "confirmation_required": bool(candidates),
             "will_delete": candidates,
             "message": "Review this list. Nothing has been deleted.",
         }
 
-    async def write_records(self, user_id: str, thread_id: str, records: dict[str, Any]) -> None:
+    async def delete_candidates(self, user_id: str, candidates: list[dict[str, Any]]) -> dict[str, Any]:
+        return await self.repositories.delete_candidates(
+            self.safe_text(user_id), candidates, suppression_days=self.tombstone_suppression_days,
+        )
+
+    async def write_records(
+        self,
+        user_id: str,
+        thread_id: str,
+        records: dict[str, Any],
+        *,
+        user_texts: list[str] | None = None,
+    ) -> None:
         user_id = self.safe_text(user_id)
+        user_texts = [self.safe_text(text) for text in (user_texts or [])]
+        rule_records = explicit_user_rules(user_texts) + soft_user_rules(user_texts)
+        rule_sentences = [normalize_text(record["rule_text"]) for record in rule_records]
+        non_rule_text = " ".join(
+            normalize_text(sentence)
+            for text in user_texts
+            for sentence in split_sentences(text)
+            if not any(rule_text in normalize_text(sentence) for rule_text in rule_sentences)
+        )
         entity_count = 0
         for entity in records.get("entities", []):
+            key = canonical_entity_key(str(entity["key"]))
+            if not key or re.search(r"(?:^|_)(?:rule|procedure|policy)(?:_|$)", key):
+                continue
+            value = self._safe_value(entity.get("value"))
+            # Do not promote names or nouns mentioned only inside a standing
+            # rule into factual entities (e.g. Aditya_rule / Aditya).
+            value_text = normalize_text(json.dumps(value, ensure_ascii=False, default=str))
+            if user_texts and (not non_rule_text or (value_text.strip('"') not in non_rule_text)):
+                if any(value_text.strip('"') in rule_text for rule_text in rule_sentences):
+                    continue
+            item_fingerprint = fingerprint("entity", {"key": key, "value": value})
+            if await self._is_suppressed(user_id, "entity", item_fingerprint):
+                logger.info("memory_store_suppressed store=entity key=%s", key)
+                continue
             await self.repositories.upsert_entity(
                 user_id,
-                self.safe_text(str(entity["key"])),
-                self._safe_value(entity.get("value")),
+                key,
+                value,
                 source="conversation",
                 confidence=float(entity.get("confidence", 1.0)),
             )
             entity_count += 1
         logger.info("memory_store_written store=entities count=%d", entity_count)
         procedure_count = 0
-        for rule in records.get("procedures", []):
+        for rule in rule_records:
             tool_pattern = rule.get("tool_pattern")
             rule_text = self.safe_text(str(rule["rule_text"]))
-            severity = str(rule.get("severity", "soft")).casefold()
-            if re.match(r"\s*(?:never|do not|don't)\b", rule_text, re.I):
-                severity = "hard"
+            severity = rule["severity"]
+            constraints = self._safe_value(rule.get("argument_constraints", []))
+            item_fingerprint = fingerprint("procedure", {
+                "rule_text": rule_text, "tool_pattern": tool_pattern, "scope": rule.get("scope", "global"),
+            })
+            if await self._is_suppressed(user_id, "procedure", item_fingerprint):
+                logger.info("memory_store_suppressed store=procedure fingerprint=%s", item_fingerprint[:10])
+                continue
             await self.repositories.add_procedure(
                 user_id,
                 rule_text,
-                scope=self.safe_text(str(rule.get("scope", "global"))),
+                scope=str(rule.get("scope", "global")),
                 tool_pattern=self.safe_text(str(tool_pattern)) if tool_pattern else None,
                 severity=severity,
+                confidence=float(rule.get("confidence", 1.0 if severity == "hard" else 0.3)),
+                argument_constraints=constraints,
             )
             procedure_count += 1
         logger.info("memory_store_written store=procedures count=%d", procedure_count)
         episode = records.get("episode")
+        episode_count = 0
         if episode:
             body = self.safe_text(str(episode.get("body", "")))
             summary = self.safe_text(str(episode.get("summary", "")))
-            vector = await self.embed_query(summary + " " + body)
-            await self.repositories.add_episode(
-                user_id, self.safe_text(thread_id), summary, body, vector,
-                topics=[self.safe_text(str(item)) for item in episode.get("topics", [])],
-                tools_used=[self.safe_text(str(item)) for item in episode.get("tools_used", [])],
-            )
-            logger.info("memory_store_written store=episodes count=1")
+            episode_value = {"summary": summary, "body": body}
+            item_fingerprint = fingerprint("episode", episode_value)
+            if await self._is_suppressed(user_id, "episode", item_fingerprint):
+                logger.info("memory_store_suppressed store=episode fingerprint=%s", item_fingerprint[:10])
+            else:
+                vector = await self.embed_query(summary + " " + body)
+                await self.repositories.add_episode(
+                    user_id, self.safe_text(thread_id), summary, body, vector,
+                    topics=[self.safe_text(str(item)) for item in episode.get("topics", [])],
+                    tools_used=[self.safe_text(str(item)) for item in episode.get("tools_used", [])],
+                )
+                logger.info("memory_store_written store=episodes count=1")
+                episode_count = 1
         else:
             logger.info("memory_store_written store=episodes count=0")
         pattern_count = 0
         for pattern in records.get("patterns", []):
+            if user_texts and not any(is_recurring_first_person(text) for text in user_texts):
+                continue
             text = self.safe_text(str(pattern["text"]))
+            item_fingerprint = fingerprint("pattern", text)
+            if await self._is_suppressed(user_id, "pattern", item_fingerprint):
+                logger.info("memory_store_suppressed store=pattern fingerprint=%s", item_fingerprint[:10])
+                continue
             vector = await self.embed_query(text)
             await self.repositories.add_pattern(
                 user_id, text, vector,
@@ -149,6 +220,16 @@ class MemoryService:
             )
             pattern_count += 1
         logger.info("memory_store_written store=patterns count=%d", pattern_count)
+        return {
+            "entities": entity_count,
+            "procedures": procedure_count,
+            "episodes": episode_count,
+            "patterns": pattern_count,
+        }
+
+    async def _is_suppressed(self, user_id: str, store: str, item_fingerprint: str) -> bool:
+        method = getattr(self.repositories, "is_suppressed", None)
+        return bool(await method(user_id, store, item_fingerprint)) if method else False
 
     async def add_knowledge(self, user_id: str, title: str, source: str, text: str, *, chunk_idx: int = 0, metadata=None):
         user_id = self.safe_text(user_id)
