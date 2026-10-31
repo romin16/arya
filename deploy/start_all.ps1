@@ -84,6 +84,7 @@ function Start-AryaService([string]$Name, [string[]]$Arguments, [string]$HealthU
     }
     Start-Sleep -Seconds 1
   }
+  Show-ServiceOutput $Name
   throw "$Name did not become healthy within 75 seconds at $HealthUrl."
 }
 
@@ -116,7 +117,8 @@ try {
   } else {
     Write-Host 'ARYA device, voice, and Google Workspace MCP are healthy. Core was skipped by -NoCore. Press Ctrl+C here to stop them.'
   }
-  while ($Processes | Where-Object { -not $_.HasExited }) {
+  while ($true) {
+    $Alive = @($Processes | Where-Object { -not $_.HasExited })
     foreach ($Process in $Processes | Where-Object { $_.HasExited }) {
       $ProcessKey = [string]$Process.Id
       if (-not $script:ReportedExits.ContainsKey($ProcessKey)) {
@@ -125,6 +127,9 @@ try {
         Show-ServiceOutput $ServiceName
         throw "$ServiceName exited (exit code $($Process.ExitCode))."
       }
+    }
+    if ($Alive.Count -eq 0) {
+      throw 'All ARYA services exited unexpectedly.'
     }
     Start-Sleep -Seconds 1
   }

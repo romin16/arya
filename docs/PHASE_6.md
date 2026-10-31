@@ -1,6 +1,6 @@
 # Phase 6 — Policy, approvals, verifier, and taint
 
-Status: **B0–B5 verified; B6–B7 not implemented**.
+Status: **B0–B6 verified; B7 full acceptance sweep remains**.
 
 ## B0 — LangGraph interrupt support
 
@@ -36,4 +36,10 @@ The PostgreSQL test feeds a malicious instruction through a mocked web result. T
 
 The PostgreSQL suite checks that an exhausted token cap prevents router/agent calls and that a one-round tool cap executes only its allowed mocked action, then reports that it could not finish. There are no network/provider or GUI calls.
 
-B6 launcher fixes and B7 full scenario coverage remain unimplemented.
+## B6 — launcher diagnostics
+
+`deploy/start_all.ps1` sets `PYTHONUNBUFFERED=1`, redirects every child service's output to `logs/<service>.log` and stderr to `logs/<service>.stderr.log`, and prints the last 40 lines on startup failure, health timeout, or a later service exit. It keeps `-NoCore`. The supervisor now checks unexpected exits even when every child has exited. Unit tests pin these launcher contracts.
+
+## B7 — full acceptance sweep
+
+The remaining B7 work is a final categorized acceptance sweep of the full test suite and manual checks. No real provider, Google account, messaging account, or GUI is exercised by automated tests.
