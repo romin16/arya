@@ -27,6 +27,7 @@ from core.graph.runtime import (
     RouteDecision,
 )
 from core.memory.repositories import MemoryRepositories
+from core.memory.policy_gate import hard_rule_for
 from core.memory.service import MemoryService
 from core.pii.vault import PIIVault
 from core.skills_runtime import SkillsRuntime
@@ -266,6 +267,20 @@ async def test_graph_forget_confirm_tombstone_dedup_and_writer_suppression():
         assert writer.calls == 0  # The rule was stored deterministically; both forget turns skipped extraction.
         assert await runtime.memory.repositories.get_pending_operation(user_token, session) is None
 
+        deleted_context, injected_procedures = await runtime.memory.always_context_and_procedures(user_token)
+        assert "Aditya" not in deleted_context
+        assert injected_procedures == []
+        assert hard_rule_for("whatsapp_send", {"contact": "Aditya"}, [
+            {**active[0], "active": False},
+        ]) is None
+        async with runtime.pool.connection() as conn:
+            inactive = await (await conn.execute(
+                "SELECT active,inactive_at FROM procedures WHERE user_id=%s AND id=%s",
+                (user_token, active[0]["id"]),
+            )).fetchone()
+        assert inactive["active"] is False
+        assert inactive["inactive_at"] is not None
+
         await runtime.memory.write_records(
             user_token, session, {}, user_texts=["never   message Aditya on WhatsApp again"],
         )
@@ -276,6 +291,23 @@ async def test_graph_forget_confirm_tombstone_dedup_and_writer_suppression():
                 (user_token,),
             )).fetchone()
         assert tombstones["count"] == 1
+        async with runtime.pool.connection() as conn:
+            await conn.execute(
+                "UPDATE procedures SET inactive_at=now()-interval '91 days' WHERE user_id=%s AND id=%s",
+                (user_token, active[0]["id"]),
+            )
+        await runtime.memory.repositories.consolidate(user_token, inactive_procedure_retention_days=90)
+        async with runtime.pool.connection() as conn:
+            purged = await (await conn.execute(
+                "SELECT count(*) AS count FROM procedures WHERE user_id=%s AND id=%s",
+                (user_token, active[0]["id"]),
+            )).fetchone()
+            retained_tombstone = await (await conn.execute(
+                "SELECT count(*) AS count FROM memory_tombstones WHERE user_id=%s AND store='procedure'",
+                (user_token,),
+            )).fetchone()
+        assert purged["count"] == 0
+        assert retained_tombstone["count"] == 1
         async with runtime.pool.connection() as conn:
             logs = await (await conn.execute(
                 "SELECT status FROM action_log WHERE user_id=%s AND thread_id=%s AND tool='memory_forget' ORDER BY id",

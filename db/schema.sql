@@ -24,9 +24,12 @@ CREATE INDEX IF NOT EXISTS kc_tsv ON knowledge_chunks USING gin(tsv);
 CREATE TABLE IF NOT EXISTS procedures (
  id bigserial PRIMARY KEY,user_id text NOT NULL,rule_text text NOT NULL,scope text DEFAULT 'global',
  tool_pattern text,severity text CHECK(severity IN ('hard','soft')),active boolean DEFAULT true,created_at timestamptz DEFAULT now(),
- confidence real NOT NULL DEFAULT 0.3,argument_constraints jsonb NOT NULL DEFAULT '[]'::jsonb);
+ confidence real NOT NULL DEFAULT 0.3,argument_constraints jsonb NOT NULL DEFAULT '[]'::jsonb,
+ inactive_at timestamptz);
 ALTER TABLE procedures ADD COLUMN IF NOT EXISTS confidence real NOT NULL DEFAULT 0.3;
 ALTER TABLE procedures ADD COLUMN IF NOT EXISTS argument_constraints jsonb NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE procedures ADD COLUMN IF NOT EXISTS inactive_at timestamptz;
+UPDATE procedures SET inactive_at=created_at WHERE active=false AND inactive_at IS NULL;
 UPDATE procedures SET severity='soft',confidence=LEAST(confidence,0.3)
  WHERE severity='hard'
    AND rule_text !~* '^\s*(please\s+)?(remember(\s+as\s+a\s+rule)?[:,]?\s*)?(from\s+now\s+on[:,]?\s*|going\s+forward[:,]?\s*)?(never|do\s+not|don''t)\s+(message|text|contact|email|call|recommend|suggest|share|send|tell|mention|use|book|schedule)\b';
@@ -50,7 +53,7 @@ WITH ranked AS (
  ) AS position
  FROM procedures WHERE active=true
 )
-UPDATE procedures p SET active=false FROM ranked r WHERE p.id=r.id AND r.position>1;
+UPDATE procedures p SET active=false,inactive_at=coalesce(p.inactive_at,now()) FROM ranked r WHERE p.id=r.id AND r.position>1;
 UPDATE entities e SET valid_to=now()
  WHERE e.valid_to IS NULL
    AND (e.key ~* '(^|_)(rule|procedure|policy)$'

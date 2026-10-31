@@ -439,6 +439,7 @@ class CoreGraphRuntime:
             self.vault,
             embed_query,
             tombstone_suppression_days=int(model_settings.get("memory", {}).get("tombstone_suppression_days", 90)),
+            inactive_procedure_retention_days=int(model_settings.get("memory", {}).get("inactive_procedure_retention_days", 90)),
         )
 
         mcp_config = yaml.safe_load((ROOT / "config" / "mcp_servers.yaml").read_text(encoding="utf-8"))
@@ -578,7 +579,10 @@ class CoreGraphRuntime:
     async def _nightly_memory_consolidation(self, user_id: str):
         try:
             if self.memory is not None:
-                await self.memory.repositories.consolidate(user_id)
+                await self.memory.repositories.consolidate(
+                    user_id,
+                    inactive_procedure_retention_days=self.memory.inactive_procedure_retention_days,
+                )
         except Exception:
             logger.exception("Nightly memory consolidation failed")
 

@@ -346,7 +346,7 @@ class MemoryRepositories:
                         if table == "entities":
                             cur = await conn.execute("UPDATE entities SET valid_to=now() WHERE user_id=%s AND id=%s AND valid_to IS NULL", (user_id, item["id"]))
                         elif table == "procedures":
-                            cur = await conn.execute("UPDATE procedures SET active=false WHERE user_id=%s AND id=%s AND active=true", (user_id, item["id"]))
+                            cur = await conn.execute("UPDATE procedures SET active=false,inactive_at=now() WHERE user_id=%s AND id=%s AND active=true", (user_id, item["id"]))
                         elif table == "patterns":
                             cur = await conn.execute("UPDATE patterns SET status='deleted' WHERE user_id=%s AND id=%s AND status='active'", (user_id, item["id"]))
                         else:
@@ -370,7 +370,7 @@ class MemoryRepositories:
             "counts_by_store": dict(counts),
         }
 
-    async def consolidate(self, user_id: str):
+    async def consolidate(self, user_id: str, *, inactive_procedure_retention_days: int = 90):
         async with self.pool.connection() as conn:
             await conn.execute(
                 """WITH ranked AS (
@@ -404,6 +404,12 @@ class MemoryRepositories:
             await conn.execute(
                 "UPDATE patterns SET status='stale' WHERE user_id=%s AND status='active' AND confidence < 0.15",
                 (user_id,),
+            )
+            # Keep forgotten rules for an audit window, then purge them. Tombstones
+            # have their own suppression window and survive the physical purge.
+            await conn.execute(
+                "DELETE FROM procedures WHERE user_id=%s AND active=false AND inactive_at < now()-(%s*interval '1 day')",
+                (user_id, max(0, int(inactive_procedure_retention_days))),
             )
             # Compact older episodic threads into a stable summary column before
             # keeping their full body available for hybrid retrieval.

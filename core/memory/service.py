@@ -20,11 +20,13 @@ logger = logging.getLogger("arya.memory")
 
 
 class MemoryService:
-    def __init__(self, repositories: MemoryRepositories, vault, embed_query, *, tombstone_suppression_days: int = 90):
+    def __init__(self, repositories: MemoryRepositories, vault, embed_query, *, tombstone_suppression_days: int = 90,
+                 inactive_procedure_retention_days: int = 90):
         self.repositories = repositories
         self.vault = vault
         self.embed_query = embed_query
         self.tombstone_suppression_days = max(0, int(tombstone_suppression_days))
+        self.inactive_procedure_retention_days = max(0, int(inactive_procedure_retention_days))
 
     def safe_text(self, text: str) -> str:
         return self.vault.tokenise(text)

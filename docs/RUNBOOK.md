@@ -37,6 +37,10 @@ Policy marks Gmail send/reply/trash, Calendar delete, and Contact delete as `ask
 
 Outbound model payloads re-tokenize genuine email addresses and phone numbers before sending. `PII_EGRESS_STRICT=1` makes the guard fail closed; pytest sets this flag for CI and regression runs. Reserved example-domain addresses and obvious placeholder numbers are ignored. PII diagnostics record the kind, payload location, path, and a short hash, never the value.
 
+## Memory deletion retention
+
+Forgotten procedures are soft-deleted immediately. All memory reads, injected rules, policy checks, and deletion counts ignore inactive procedures. Nightly consolidation physically purges them after `memory.inactive_procedure_retention_days` (90 days by default). Their tombstones remain governed independently by `memory.tombstone_suppression_days` and prevent background extraction from recreating them during that suppression window.
+
 ## Manual checks
 
 - Confirm the launcher reports all four processes healthy.

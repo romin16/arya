@@ -15,7 +15,7 @@ def hard_rule_for(tool_name: str, args: dict[str, Any], procedures: list[dict[st
     for rule in procedures:
         if str(rule.get("severity", "")).casefold() != "hard":
             continue
-        if rule.get("active", True) is False:
+        if not rule.get("active", True):
             continue
         parsed = parse_explicit_rule(str(rule.get("rule_text", "")))
         pattern = str(rule.get("tool_pattern") or (parsed or {}).get("tool_pattern") or "").strip()

@@ -9,5 +9,7 @@ limits:
   tool_timeout_seconds: 30
 memory:
   tombstone_suppression_days: 90
+  # Forgotten procedures stay inactive for this audit window, then nightly consolidation purges them.
+  inactive_procedure_retention_days: 90
   soft_procedure_confidence: 0.3
   pending_operation_ttl_seconds: 300
