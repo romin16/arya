@@ -30,6 +30,22 @@ def test_hard_procedural_rules_block_calls_in_code():
     assert hard_rule_for("whatsapp_send", {}, [{**rules[0], "tool_pattern": "whatsapp_*"}]) is not None
 
 
+def test_memory_writer_schema_uses_typed_objects_supported_by_openai_strict_output():
+    schema = MemoryWrite.model_json_schema()
+
+    def check(node):
+        if isinstance(node, dict):
+            if node.get("type") == "object":
+                assert node.get("additionalProperties") in (None, False)
+            for value in node.values():
+                check(value)
+        elif isinstance(node, list):
+            for value in node:
+                check(value)
+
+    check(schema)
+
+
 @pytest.mark.asyncio
 async def test_memory_routing_eval_uses_mock_structured_llm_for_paraphrases_and_negatives():
     dataset = yaml.safe_load((Path(__file__).resolve().parents[2] / "evals/datasets/memory-routing.yaml").read_text(encoding="utf-8"))

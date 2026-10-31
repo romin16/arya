@@ -77,11 +77,37 @@ class MemoryRead(BaseModel):
     date: str | None = None
 
 
+class MemoryEntity(BaseModel):
+    key: str
+    value: str
+    confidence: float = 1.0
+
+
+class MemoryProcedure(BaseModel):
+    rule_text: str
+    scope: str = "global"
+    tool_pattern: str | None = None
+    severity: Literal["hard", "soft"] = "soft"
+
+
+class MemoryEpisode(BaseModel):
+    summary: str
+    body: str
+    topics: list[str] = Field(default_factory=list)
+    tools_used: list[str] = Field(default_factory=list)
+
+
+class MemoryPattern(BaseModel):
+    text: str
+    confidence: float = 0.5
+    evidence_count: int = 1
+
+
 class MemoryWrite(BaseModel):
-    entities: list[dict[str, Any]] = Field(default_factory=list)
-    procedures: list[dict[str, Any]] = Field(default_factory=list)
-    episode: dict[str, Any] | None = None
-    patterns: list[dict[str, Any]] = Field(default_factory=list)
+    entities: list[MemoryEntity] = Field(default_factory=list)
+    procedures: list[MemoryProcedure] = Field(default_factory=list)
+    episode: MemoryEpisode | None = None
+    patterns: list[MemoryPattern] = Field(default_factory=list)
 
 
 class MemorySearchArgs(BaseModel):
@@ -453,9 +479,14 @@ class CoreGraphRuntime:
                 serialised.append({"role": role, "content": self.vault.tokenise(_text_value(message.content))})
             extracted = await self.memory_writer_model.ainvoke([
                 SystemMessage(content=(
-                    "Extract only durable user facts, explicit standing rules, a concise episode, and well-supported patterns. "
-                    "Return empty fields when unsupported. All content is PII-tokenized; preserve tokens exactly. "
-                    "Never create a hard rule unless the user explicitly stated it as a standing rule."
+                    "Extract durable facts, explicit standing rules, a concise episode, and user-stated recurring behavior. "
+                    "Process each user message clause separately. Put an explicit 'never', 'do not', or 'don't' instruction "
+                    "in procedures, preserve the rule as written, use global scope, and set severity hard. Do not bury it "
+                    "only in an entity or episode. Put first-person recurring behavior stated with words like 'usually' "
+                    "or 'often' in patterns, with conservative confidence and evidence_count 1. Do not invent repetition "
+                    "from a one-time event. Store durable current facts in entities; summarize the relevant conversation "
+                    "in episode. Return empty fields only when that category is genuinely unsupported. All content is "
+                    "PII-tokenized; preserve tokens exactly, and extract only from user-authored content, not tool results."
                 )),
                 HumanMessage(content=json.dumps({"messages": serialised, "tools": latest_action_entries(recent)}, ensure_ascii=False)),
             ])
