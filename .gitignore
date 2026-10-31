@@ -13,3 +13,5 @@ __pycache__/
 temp_*
 *.egg-info/
 .uv-cache/
+
+.vscode/
