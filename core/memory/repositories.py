@@ -6,7 +6,7 @@ import logging
 from typing import Any
 
 from psycopg.types.json import Jsonb
-from core.memory.normalization import fingerprint, normalize_text, parse_explicit_rule
+from core.memory.normalization import fingerprint, normalize_text, parse_explicit_rule, pattern_identity
 
 logger = logging.getLogger("arya.memory")
 
@@ -155,11 +155,35 @@ class MemoryRepositories:
             )
             return (await cur.fetchone())["id"]
 
+    async def record_pattern_observation(self, user_id: str, pattern_key: str, text: str, *, observed_on=None) -> dict[str, int]:
+        async with self.pool.connection() as conn:
+            await conn.execute(
+                """INSERT INTO pattern_observations(user_id,pattern_key,text,observation_day)
+                   VALUES(%s,%s,%s,coalesce(%s::date,CURRENT_DATE))
+                   ON CONFLICT(user_id,pattern_key,observation_day) DO UPDATE
+                     SET observation_count=pattern_observations.observation_count+1,last_seen=now(),text=EXCLUDED.text""",
+                (user_id, pattern_key, text, observed_on),
+            )
+            cur = await conn.execute(
+                """SELECT sum(observation_count)::integer AS observations,count(*)::integer AS days
+                   FROM pattern_observations WHERE user_id=%s AND pattern_key=%s""",
+                (user_id, pattern_key),
+            )
+            row = await cur.fetchone()
+            return {"observations": row["observations"] or 0, "days": row["days"] or 0}
+
     async def add_pattern(self, user_id: str, text: str, embedding: list[float], *, confidence: float, evidence_count: int = 1):
+        pattern_key = pattern_identity(text)
         async with self.pool.connection() as conn:
             cur = await conn.execute(
-                "INSERT INTO patterns(user_id,text,embedding,confidence,evidence_count) VALUES(%s,%s,%s::vector,%s,%s) RETURNING id",
-                (user_id, text, _vector(embedding), confidence, evidence_count),
+                """INSERT INTO patterns(user_id,text,embedding,confidence,evidence_count,pattern_key)
+                   VALUES(%s,%s,%s::vector,%s,%s,%s)
+                   ON CONFLICT(user_id,pattern_key) WHERE status='active' DO UPDATE
+                     SET text=EXCLUDED.text,embedding=EXCLUDED.embedding,
+                         confidence=GREATEST(patterns.confidence,EXCLUDED.confidence),
+                         evidence_count=EXCLUDED.evidence_count,last_seen=now()
+                   RETURNING id""",
+                (user_id, text, _vector(embedding), confidence, evidence_count, pattern_key),
             )
             return (await cur.fetchone())["id"]
 

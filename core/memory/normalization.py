@@ -39,6 +39,12 @@ def normalize_text(value: str) -> str:
     return " ".join(value.split())
 
 
+def pattern_identity(value: str) -> str:
+    """Stable non-reversible key shared with the PostgreSQL pattern index."""
+    normalized = normalize_text(value)
+    return hashlib.md5(normalized.encode("utf-8")).hexdigest()
+
+
 def canonical_entity_key(value: str) -> str:
     key = re.sub(r"[^a-z0-9]+", "_", normalize_text(value)).strip("_")
     return ENTITY_ALIASES.get(key, key)

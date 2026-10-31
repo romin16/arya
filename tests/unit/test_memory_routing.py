@@ -303,7 +303,7 @@ async def test_background_writer_logs_empty_extraction_and_persistence(caplog):
             return MemoryWrite()
 
     class Memory:
-        async def write_records(self, user_id, thread_id, records, *, user_texts):
+        async def write_records(self, user_id, thread_id, records, *, user_texts, memory_management_turn=False):
             assert records == {"entities": [], "procedures": [], "episode": None, "patterns": []}
             assert user_id == "user-test"
             assert user_texts == ["remember my preference"]

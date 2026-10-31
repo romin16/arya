@@ -11,5 +11,7 @@ memory:
   tombstone_suppression_days: 90
   # Forgotten procedures stay inactive for this audit window, then nightly consolidation purges them.
   inactive_procedure_retention_days: 90
+  pattern_min_observations: 3
+  pattern_min_distinct_days: 2
   soft_procedure_confidence: 0.3
   pending_operation_ttl_seconds: 300

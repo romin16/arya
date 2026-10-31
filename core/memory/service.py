@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from datetime import date
 from typing import Any
 
 from core.memory.normalization import (
@@ -11,6 +12,7 @@ from core.memory.normalization import (
     fingerprint,
     is_recurring_first_person,
     normalize_text,
+    pattern_identity,
     split_sentences,
     soft_user_rules,
 )
@@ -21,12 +23,15 @@ logger = logging.getLogger("arya.memory")
 
 class MemoryService:
     def __init__(self, repositories: MemoryRepositories, vault, embed_query, *, tombstone_suppression_days: int = 90,
-                 inactive_procedure_retention_days: int = 90):
+                 inactive_procedure_retention_days: int = 90, pattern_min_observations: int = 3,
+                 pattern_min_distinct_days: int = 2):
         self.repositories = repositories
         self.vault = vault
         self.embed_query = embed_query
         self.tombstone_suppression_days = max(0, int(tombstone_suppression_days))
         self.inactive_procedure_retention_days = max(0, int(inactive_procedure_retention_days))
+        self.pattern_min_observations = max(1, int(pattern_min_observations))
+        self.pattern_min_distinct_days = max(1, int(pattern_min_distinct_days))
 
     def safe_text(self, text: str) -> str:
         return self.vault.tokenise(text)
@@ -127,6 +132,8 @@ class MemoryService:
         *,
         user_texts: list[str] | None = None,
         override_suppression: bool = False,
+        memory_management_turn: bool = False,
+        observation_day: date | None = None,
     ) -> dict[str, int]:
         user_id = self.safe_text(user_id)
         user_texts = [self.safe_text(text) for text in (user_texts or [])]
@@ -207,19 +214,40 @@ class MemoryService:
         else:
             logger.info("memory_store_written store=episodes count=0")
         pattern_count = 0
-        for pattern in records.get("patterns", []):
-            if user_texts and not any(is_recurring_first_person(text) for text in user_texts):
-                continue
+        management_text = re.compile(
+            r"\b(?:forget|delete|remove|clear|erase)\b.{0,100}\b(?:memory|memories|rule|fact|pattern|preference)\b|"
+            r"\b(?:remember\s+(?:this|that|it)|what\s+do\s+you\s+remember)\b",
+            re.I,
+        )
+        may_observe_pattern = (
+            not memory_management_turn
+            and not rule_records
+            and not any(management_text.search(text) for text in user_texts)
+            and (not user_texts or any(is_recurring_first_person(text) for text in user_texts))
+        )
+        for pattern in records.get("patterns", []) if may_observe_pattern else []:
             text = self.safe_text(str(pattern["text"]))
             item_fingerprint = fingerprint("pattern", text)
             if await self._is_suppressed(user_id, "pattern", item_fingerprint):
                 logger.info("memory_store_suppressed store=pattern fingerprint=%s", item_fingerprint[:10])
                 continue
+            identity = pattern_identity(text)
+            observation = await self.repositories.record_pattern_observation(
+                user_id, identity, text, observed_on=observation_day,
+            )
+            if (observation["observations"] < self.pattern_min_observations
+                    or observation["days"] < self.pattern_min_distinct_days):
+                logger.info(
+                    "memory_pattern_observed count=%d days=%d required_count=%d required_days=%d",
+                    observation["observations"], observation["days"],
+                    self.pattern_min_observations, self.pattern_min_distinct_days,
+                )
+                continue
             vector = await self.embed_query(text)
             await self.repositories.add_pattern(
                 user_id, text, vector,
                 confidence=float(pattern.get("confidence", 0.5)),
-                evidence_count=int(pattern.get("evidence_count", 1)),
+                evidence_count=observation["observations"],
             )
             pattern_count += 1
         logger.info("memory_store_written store=patterns count=%d", pattern_count)

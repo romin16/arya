@@ -67,6 +67,25 @@ UPDATE entities e SET valid_to=now()
 CREATE TABLE IF NOT EXISTS patterns (
  id bigserial PRIMARY KEY,user_id text NOT NULL,text text NOT NULL,evidence_count int DEFAULT 1,
  confidence real,status text DEFAULT 'active',first_seen timestamptz DEFAULT now(),last_seen timestamptz DEFAULT now(),embedding vector(1536));
+ALTER TABLE patterns ADD COLUMN IF NOT EXISTS pattern_key text;
+UPDATE patterns SET pattern_key=md5(trim(regexp_replace(regexp_replace(lower(text),'[^[:alnum:]_]+',' ','g'),'\s+',' ','g'))) WHERE pattern_key IS NULL;
+WITH ranked AS (
+ SELECT id,first_value(id) OVER (PARTITION BY user_id,pattern_key ORDER BY confidence DESC,evidence_count DESC,id) AS keeper,
+        sum(evidence_count) OVER (PARTITION BY user_id,pattern_key) AS evidence,
+        max(confidence) OVER (PARTITION BY user_id,pattern_key) AS confidence
+ FROM patterns WHERE status='active'
+), keepers AS (
+ UPDATE patterns p SET evidence_count=r.evidence,confidence=r.confidence
+ FROM ranked r WHERE p.id=r.keeper RETURNING p.id
+)
+UPDATE patterns p SET status='merged' FROM ranked r WHERE p.id=r.id AND r.id<>r.keeper;
+CREATE UNIQUE INDEX IF NOT EXISTS patterns_active_identity ON patterns(user_id,pattern_key) WHERE status='active';
+CREATE TABLE IF NOT EXISTS pattern_observations (
+ id bigserial PRIMARY KEY,user_id text NOT NULL,pattern_key text NOT NULL,text text NOT NULL,
+ observation_day date NOT NULL,observation_count integer NOT NULL DEFAULT 1,
+ first_seen timestamptz NOT NULL DEFAULT now(),last_seen timestamptz NOT NULL DEFAULT now(),
+ UNIQUE(user_id,pattern_key,observation_day));
+CREATE INDEX IF NOT EXISTS pattern_observations_user_key ON pattern_observations(user_id,pattern_key);
 CREATE INDEX IF NOT EXISTS patterns_vec ON patterns USING hnsw(embedding vector_cosine_ops);
 CREATE INDEX IF NOT EXISTS patterns_user_status ON patterns(user_id,status);
 CREATE INDEX IF NOT EXISTS entities_user_current ON entities(user_id,key) WHERE valid_to IS NULL;

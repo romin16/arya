@@ -440,6 +440,8 @@ class CoreGraphRuntime:
             embed_query,
             tombstone_suppression_days=int(model_settings.get("memory", {}).get("tombstone_suppression_days", 90)),
             inactive_procedure_retention_days=int(model_settings.get("memory", {}).get("inactive_procedure_retention_days", 90)),
+            pattern_min_observations=int(model_settings.get("memory", {}).get("pattern_min_observations", 3)),
+            pattern_min_distinct_days=int(model_settings.get("memory", {}).get("pattern_min_distinct_days", 2)),
         )
 
         mcp_config = yaml.safe_load((ROOT / "config" / "mcp_servers.yaml").read_text(encoding="utf-8"))
@@ -608,6 +610,11 @@ class CoreGraphRuntime:
                 and any(call.get("name") == "memory_forget" for call in message.tool_calls)
                 for message in turn_messages
             )
+            memory_management_tool_called = any(
+                isinstance(message, AIMessage)
+                and any(call.get("name") in {"memory_search", "memory_forget"} for call in message.tool_calls)
+                for message in turn_messages
+            )
             latest_user_text = _text_value(all_messages[latest_user_index].content) if all_messages else ""
             forget_request = bool(re.match(
                 r"\s*(?:please\s+)?(?:forget\b|remove\b.{0,80}\bfrom\s+memory\b|delete\b.{0,80}\bmemory\b)",
@@ -664,6 +671,7 @@ class CoreGraphRuntime:
                 logger.warning("memory_write_empty_extraction turn=%s", turn_hash)
             persisted_counts = await self.memory.write_records(
                 state["user_id"], state["thread_id"], records, user_texts=user_texts,
+                memory_management_turn=memory_management_tool_called,
             )
             logger.info(
                 "memory_write_persisted turn=%s accepted_counts=%s elapsed_ms=%d",

@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import sys
+from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
@@ -455,5 +456,70 @@ async def test_real_graph_tokenizes_email_before_entities_episodes_and_procedure
                 "SELECT key,value FROM entities WHERE user_id=%s AND valid_to IS NULL", (user_token,),
             )).fetchall()
             assert any(row["key"] == "employer" for row in entities)
+    finally:
+        await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_patterns_promote_only_after_observations_across_two_days_and_skip_management_turns():
+    database_url = os.environ["ARYA_TEST_DATABASE_URL"]
+    session = f"memory-pattern-threshold-{uuid4().hex}"
+    user_id = f"memory-user-{uuid4().hex}"
+    runtime = await _runtime(database_url, writer=ScriptedWriter(), session=session)
+    try:
+        user_token = runtime.vault.tokenise(user_id)
+        text = "I usually read about astronomy after work."
+        records = {"patterns": [{"text": text, "confidence": 0.7}]}
+        for day in (date(2026, 3, 1), date(2026, 3, 1)):
+            persisted = await runtime.memory.write_records(
+                user_token, session, records, user_texts=[text], observation_day=day,
+            )
+            assert persisted["patterns"] == 0
+        async with runtime.pool.connection() as conn:
+            before_threshold = await (await conn.execute(
+                "SELECT count(*) AS count FROM patterns WHERE user_id=%s AND status='active'",
+                (user_token,),
+            )).fetchone()
+        assert before_threshold["count"] == 0
+
+        promoted = await runtime.memory.write_records(
+            user_token, session, records, user_texts=[text], observation_day=date(2026, 3, 2),
+        )
+        assert promoted["patterns"] == 1
+        async with runtime.pool.connection() as conn:
+            active_pattern = await (await conn.execute(
+                "SELECT text,evidence_count FROM patterns WHERE user_id=%s AND status='active'",
+                (user_token,),
+            )).fetchone()
+            observed = await (await conn.execute(
+                "SELECT sum(observation_count) AS count,count(*) AS days FROM pattern_observations WHERE user_id=%s",
+                (user_token,),
+            )).fetchone()
+        assert active_pattern["text"] == text
+        assert active_pattern["evidence_count"] == 3
+        assert observed["count"] == 3 and observed["days"] == 2
+
+        # A memory read/delete action or explicit rule-writing turn contributes no pattern evidence.
+        await runtime.memory.write_records(
+            user_token, session, records, user_texts=[text],
+            memory_management_turn=True, observation_day=date(2026, 3, 3),
+        )
+        await runtime.memory.write_records(
+            user_token, session, records,
+            user_texts=[text, "Never message Aditya on WhatsApp again."],
+            observation_day=date(2026, 3, 4),
+        )
+        await runtime.memory.write_records(
+            user_token, session, records,
+            user_texts=["Forget the pattern about my usual astronomy reading."],
+            observation_day=date(2026, 3, 5),
+        )
+        async with runtime.pool.connection() as conn:
+            observed_after_management = await (await conn.execute(
+                "SELECT sum(observation_count) AS count,count(*) AS days FROM pattern_observations WHERE user_id=%s",
+                (user_token,),
+            )).fetchone()
+        assert observed_after_management["count"] == 3
+        assert observed_after_management["days"] == 2
     finally:
         await runtime.close()
