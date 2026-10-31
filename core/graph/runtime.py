@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -435,9 +436,16 @@ class CoreGraphRuntime:
             logger.exception("Nightly memory consolidation failed")
 
     async def _background_memory_write(self, state: ARYAState):
+        started = asyncio.get_running_loop().time()
+        turn_hash = hashlib.sha256(str(state.get("thread_id", "")).encode()).hexdigest()[:10]
         try:
-            if self.memory is None or self.memory_writer_model is None:
+            if self.memory is None:
+                logger.error("memory_write_skipped reason=memory_service_unavailable turn=%s", turn_hash)
                 return
+            if self.memory_writer_model is None:
+                logger.error("memory_write_skipped reason=writer_model_unavailable turn=%s", turn_hash)
+                return
+            logger.info("memory_write_started turn=%s", turn_hash)
             recent = state.get("messages", [])[-12:]
             serialised = []
             for message in recent:
@@ -452,9 +460,24 @@ class CoreGraphRuntime:
                 HumanMessage(content=json.dumps({"messages": serialised, "tools": latest_action_entries(recent)}, ensure_ascii=False)),
             ])
             records = extracted.model_dump() if isinstance(extracted, MemoryWrite) else extracted
+            if not isinstance(records, dict):
+                raise TypeError(f"memory writer returned {type(records).__name__}, expected dict or MemoryWrite")
+            counts = {
+                "entities": len(records.get("entities") or []),
+                "procedures": len(records.get("procedures") or []),
+                "episodes": int(bool(records.get("episode"))),
+                "patterns": len(records.get("patterns") or []),
+            }
+            logger.info("memory_write_extracted turn=%s counts=%s", turn_hash, counts)
+            if not any(counts.values()):
+                logger.warning("memory_write_empty_extraction turn=%s", turn_hash)
             await self.memory.write_records(state["user_id"], state["thread_id"], records)
+            logger.info(
+                "memory_write_persisted turn=%s counts=%s elapsed_ms=%d",
+                turn_hash, counts, int((asyncio.get_running_loop().time() - started) * 1000),
+            )
         except Exception:
-            logger.exception("Background memory_write failed")
+            logger.exception("Background memory_write failed turn=%s", turn_hash)
 
     def _queue_memory_write(self, state: ARYAState) -> None:
         task = asyncio.create_task(self._background_memory_write(state), name="arya-memory-write")
@@ -712,6 +735,11 @@ class CoreGraphRuntime:
             return {"messages": [AIMessage(content=message)]}
 
         async def respond(state: ARYAState) -> dict[str, Any]:
+            get_stream_writer()({
+                "kind": "activity",
+                "event": "Memory",
+                "message": "Saving relevant facts and conversation context in the background",
+            })
             get_stream_writer()({"kind": "complete"})
             self._queue_memory_write(state)
             return {}

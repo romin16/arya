@@ -1,5 +1,6 @@
 import json
 import asyncio
+import logging
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -10,7 +11,7 @@ from langchain_core.messages import AIMessageChunk, HumanMessage, SystemMessage
 from langchain_core.tools import StructuredTool
 from langgraph.checkpoint.memory import MemorySaver
 
-from core.graph.runtime import CoreGraphRuntime, RouteDecision
+from core.graph.runtime import CoreGraphRuntime, MemoryWrite, RouteDecision
 from core.memory.policy_gate import hard_rule_for
 from core.pii.vault import PIIVault
 from core.skills_runtime import SkillsRuntime
@@ -107,6 +108,7 @@ async def test_route_uses_one_structured_call_and_passes_last_action_to_resolve_
     assert utterance in runtime.router_model.calls[0][1].content
     assert "spotify_play" in runtime.main_model.system_text
     assert any(event.get("kind") == "token" for event in events)
+    assert any(event.get("kind") == "activity" and event.get("event") == "Memory" for event in events)
 
 
 @pytest.mark.asyncio
@@ -125,6 +127,50 @@ async def test_memory_write_is_queued_without_waiting_for_the_writer():
     assert len(runtime.background_tasks) == 1
     release.set()
     await asyncio.gather(*runtime.background_tasks)
+
+
+@pytest.mark.asyncio
+async def test_background_writer_logs_empty_extraction_and_persistence(caplog):
+    caplog.set_level(logging.INFO, logger="arya.core")
+    class Writer:
+        async def ainvoke(self, messages):
+            return MemoryWrite()
+
+    class Memory:
+        async def write_records(self, user_id, thread_id, records):
+            assert records == {"entities": [], "procedures": [], "episode": None, "patterns": []}
+
+    runtime = CoreGraphRuntime()
+    runtime.vault = PIIVault(b"write-log-test", Fernet.generate_key())
+    runtime.memory = Memory()
+    runtime.memory_writer_model = Writer()
+    await runtime._background_memory_write({
+        "messages": [HumanMessage(content="remember my preference")],
+        "user_id": "user-test",
+        "thread_id": "thread-test",
+    })
+    assert "memory_write_started" in caplog.text
+    assert "memory_write_empty_extraction" in caplog.text
+    assert "memory_write_persisted" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_background_writer_logs_full_error(caplog):
+    class BrokenWriter:
+        async def ainvoke(self, messages):
+            raise RuntimeError("mock structured output error")
+
+    runtime = CoreGraphRuntime()
+    runtime.vault = PIIVault(b"write-error-test", Fernet.generate_key())
+    runtime.memory = object()
+    runtime.memory_writer_model = BrokenWriter()
+    await runtime._background_memory_write({
+        "messages": [HumanMessage(content="remember my preference")],
+        "user_id": "user-test",
+        "thread_id": "thread-test",
+    })
+    assert "Background memory_write failed" in caplog.text
+    assert "RuntimeError: mock structured output error" in caplog.text
 
 
 def test_real_tool_schema_fixture_and_skill_are_loaded_for_graph_regression():

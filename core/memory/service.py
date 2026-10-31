@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from typing import Any
 
 from core.memory.repositories import MemoryRepositories
+
+logger = logging.getLogger("arya.memory")
 
 
 class MemoryService:
@@ -95,6 +98,7 @@ class MemoryService:
 
     async def write_records(self, user_id: str, thread_id: str, records: dict[str, Any]) -> None:
         user_id = self.safe_text(user_id)
+        entity_count = 0
         for entity in records.get("entities", []):
             await self.repositories.upsert_entity(
                 user_id,
@@ -103,6 +107,9 @@ class MemoryService:
                 source="conversation",
                 confidence=float(entity.get("confidence", 1.0)),
             )
+            entity_count += 1
+        logger.info("memory_store_written store=entities count=%d", entity_count)
+        procedure_count = 0
         for rule in records.get("procedures", []):
             tool_pattern = rule.get("tool_pattern")
             rule_text = self.safe_text(str(rule["rule_text"]))
@@ -116,6 +123,8 @@ class MemoryService:
                 tool_pattern=self.safe_text(str(tool_pattern)) if tool_pattern else None,
                 severity=severity,
             )
+            procedure_count += 1
+        logger.info("memory_store_written store=procedures count=%d", procedure_count)
         episode = records.get("episode")
         if episode:
             body = self.safe_text(str(episode.get("body", "")))
@@ -126,6 +135,10 @@ class MemoryService:
                 topics=[self.safe_text(str(item)) for item in episode.get("topics", [])],
                 tools_used=[self.safe_text(str(item)) for item in episode.get("tools_used", [])],
             )
+            logger.info("memory_store_written store=episodes count=1")
+        else:
+            logger.info("memory_store_written store=episodes count=0")
+        pattern_count = 0
         for pattern in records.get("patterns", []):
             text = self.safe_text(str(pattern["text"]))
             vector = await self.embed_query(text)
@@ -134,6 +147,8 @@ class MemoryService:
                 confidence=float(pattern.get("confidence", 0.5)),
                 evidence_count=int(pattern.get("evidence_count", 1)),
             )
+            pattern_count += 1
+        logger.info("memory_store_written store=patterns count=%d", pattern_count)
 
     async def add_knowledge(self, user_id: str, title: str, source: str, text: str, *, chunk_idx: int = 0, metadata=None):
         user_id = self.safe_text(user_id)
