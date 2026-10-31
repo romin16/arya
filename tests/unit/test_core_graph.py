@@ -24,6 +24,7 @@ from core.graph.runtime import (
     _scan_openai_payload,
     device_mcp_connection,
 )
+from core.policy_gate import ToolPolicy
 from core.__main__ import FlushingStreamHandler
 from core.mcp_adapters.google_workspace import GOOGLE_REQUIRED_SOURCES, adapt_google_tools
 from core.pii.vault import PIIVault
@@ -231,6 +232,7 @@ async def test_custom_graph_tokenises_tool_results_logs_actions_and_detokenises_
     agent_model = FakeAgentModel(raw_email, vault)
     runtime.main_model = agent_model
     runtime.device_tools = {"whatsapp_send": device_tool}
+    runtime.policy = ToolPolicy({"tools": {"*": {"mode": "auto"}}}, {"whatsapp_send", "load_skill"})
     runtime.limits = {"max_tool_rounds": 8, "tool_timeout_seconds": 2, "token_budget": 100}
     runtime.persona = "Test persona"
 
@@ -387,8 +389,8 @@ async def test_email_request_with_real_server_schemas_passes_strict_egress():
         )
     ]
     response = "".join(event["chunk"] for event in events if "chunk" in event)
-    assert "approval flow is implemented" in response
-    assert "No email was sent" in response
+    assert "Approval is not set up yet" in response
+    assert "Nothing was changed" in response
     assert model.requests
     assert calls == []
 
@@ -472,6 +474,7 @@ async def test_runtime_start_checks_google_tools_with_mocked_servers(monkeypatch
 
     await runtime.start()
     assert runtime.graph is not None
+    assert runtime.policy is not None
     assert runtime.authorized_account_token.startswith("[EMAIL_")
     assert "authorized@example.com" not in runtime.authorized_account_token
     assert "gmail_search" in runtime.tools
@@ -566,7 +569,7 @@ async def test_protected_email_action_returns_clear_refusal_without_calling_goog
         )
     ]
     response = "".join(event["chunk"] for event in events if "chunk" in event)
-    assert "approval flow is implemented" in response
-    assert "No email was sent" in response
+    assert "Approval is not set up yet" in response
+    assert "Nothing was changed" in response
     assert calls == []
     assert runtime.main_model.call_count == 1

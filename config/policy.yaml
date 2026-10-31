@@ -1,7 +1,7 @@
 injection_taint_escalation: true
 approval_timeout_seconds: 120
 tools:
-  "*read*": {mode: auto}
+  "*": {mode: auto}
   "*search*": {mode: auto}
   "spotify_*": {mode: auto}
   open_app: {mode: auto}
@@ -9,7 +9,6 @@ tools:
   set_volume: {mode: auto}
   type_text: {mode: auto}
   take_screenshot: {mode: auto}
-  browser_task: {mode: auto}
   vscode_open*: {mode: auto}
   vscode_search: {mode: auto}
   vscode_format: {mode: auto}

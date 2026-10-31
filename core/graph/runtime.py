@@ -34,6 +34,7 @@ from core.memory.normalization import explicit_user_rules
 from core.memory.repositories import MemoryRepositories
 from core.memory.service import MemoryService
 from core.memory.policy_gate import hard_rule_for
+from core.policy_gate import ToolPolicy
 from core.mcp_adapters.google_workspace import (
     GOOGLE_REQUIRED_SOURCES,
     adapt_google_tools,
@@ -382,6 +383,7 @@ class CoreGraphRuntime:
         self.memory: MemoryService | None = None
         self.memory_writer_model: Any = None
         self.memory_tools: dict[str, Any] = {}
+        self.policy: ToolPolicy | None = None
         self.embedding_model: OpenAIEmbeddings | None = None
         self.background_tasks: set[asyncio.Task] = set()
         self.scheduler = None
@@ -530,6 +532,10 @@ class CoreGraphRuntime:
             name="load_skill",
             description="Load one skill's instructions and activate its tools for this turn.",
             args_schema=LoadSkillArgs,
+        )
+        self.policy = ToolPolicy.from_file(
+            ROOT / "config" / "policy.yaml",
+            set(self.tools) | set(self.memory_tools) | {"load_skill"},
         )
         self.graph = self._build_graph()
         self.scheduler = self._start_memory_scheduler(self.user_id)
@@ -1039,6 +1045,28 @@ class CoreGraphRuntime:
                             content = _tool_content(result, self.vault)
                             status = "success"
                             results.append(ToolMessage(content=content, name=name, tool_call_id=call["id"], status=status))
+                            continue
+                        mode = (
+                            self.policy.mode_for(name, safe_args, tainted=bool(state.get("tainted")))
+                            if self.policy is not None else "ask"
+                        )
+                        policy_refusal = None
+                        if mode == "block":
+                            policy_refusal = f"{name} is blocked by local policy. Nothing was changed."
+                        elif mode == "ask":
+                            policy_refusal = f"Approval is not set up yet for {name}. Nothing was changed."
+                        if policy_refusal:
+                            refusal_message = policy_refusal
+                            result = {
+                                "success": False,
+                                "approval_required": mode == "ask",
+                                "policy_blocked": mode == "block",
+                                "message": refusal_message,
+                            }
+                            content = _tool_content(result, self.vault)
+                            results.append(ToolMessage(
+                                content=content, name=name, tool_call_id=call["id"], status="success",
+                            ))
                             continue
                         tool = self.tools.get(name) or self.device_tools.get(name)
                         if tool is None or name not in self.skills.tool_names(active_skills):
