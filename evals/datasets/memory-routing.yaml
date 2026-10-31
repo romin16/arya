@@ -5,8 +5,11 @@
     - How much do I earn right now?
     - What salary do you have saved for me?
   negatives:
-    - What is the average salary for a Python developer?
-    - Explain how salaries are benchmarked.
+    - utterance: What is the average salary for a Python developer?
+      operation: none
+    - utterance: Explain how salaries are benchmarked.
+      operation: knowledge_read
+      store: knowledge
 - id: past_decision
   operation: episode_read
   store: episode
@@ -15,8 +18,10 @@
     - Remind me what we agreed on in April.
     - What was our decision from April?
   negatives:
-    - What should we decide today?
-    - Give me a new recommendation for this year.
+    - utterance: What should we decide today?
+      operation: none
+    - utterance: Give me a new recommendation for this year.
+      operation: none
 - id: general_knowledge
   operation: knowledge_read
   store: knowledge
@@ -25,8 +30,12 @@
     - Explain systematic investment plans.
     - What is the basic idea behind investing through a SIP?
   negatives:
-    - What did I tell you about my SIP last week?
-    - Which investment plan did I choose?
+    - utterance: What did I tell you about my SIP last week?
+      operation: episode_read
+      store: episode
+    - utterance: Which investment plan did I choose?
+      operation: episode_read
+      store: episode
 - id: entity_update
   operation: entity_update_and_episode_write
   utterances:
@@ -34,8 +43,12 @@
     - I now work at TCS.
     - "Update this: my new employer is TCS."
   negatives:
-    - What is TCS?
-    - Find general information about TCS.
+    - utterance: What is TCS?
+      operation: knowledge_read
+      store: knowledge
+    - utterance: Find general information about TCS.
+      operation: knowledge_read
+      store: knowledge
 - id: standing_rule
   operation: procedural_write
   utterances:
@@ -43,8 +56,11 @@
     - Going forward, don't suggest stocks for me.
     - "Please remember as a rule: do not recommend equity."
   negatives:
-    - What is equity investing?
-    - Compare equity funds with debt funds.
+    - utterance: What is equity investing?
+      operation: none
+    - utterance: Compare equity funds with debt funds.
+      operation: knowledge_read
+      store: knowledge
 - id: inferred_pattern
   operation: pattern_read
   store: pattern
@@ -53,5 +69,8 @@
     - I feel uneasy when markets swing this much.
     - Market fluctuations are making me nervous.
   negatives:
-    - Define market volatility.
-    - Show today's market volatility data.
+    - utterance: Define market volatility.
+      operation: knowledge_read
+      store: knowledge
+    - utterance: Show today's market volatility data.
+      operation: none

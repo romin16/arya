@@ -12,26 +12,53 @@ async def evaluate_memory_routing(router, dataset: list[dict]):
     from langchain_core.messages import HumanMessage, SystemMessage
 
     prompt = (
-        "Classify the user's memory intent as entity_read, episode_read, knowledge_read, "
-        "entity_update_and_episode_write, procedural_write, pattern_read, or none. "
-        "Set memory_reads to episode/knowledge/pattern only when a read is needed. "
-        "Use none for requests that do not concern user memory."
+        "Route each request with one memory_intent and any necessary memory_reads. Choose exactly one intent: "
+        "entity_read (a question about a stored current fact), episode_read (a past event or decision), "
+        "knowledge_read (general reference knowledge), entity_update_and_episode_write (a user reports a durable current-fact update), "
+        "procedural_write (an explicit standing instruction), pattern_read (recall a stated recurring preference or behavior), "
+        "or none (no personal memory read or write). memory_reads may contain only episode, knowledge, or pattern. "
+        "For episode/knowledge/pattern reads, include a concise search query in memory_reads. For entity reads and writes, "
+        "use the always-injected current entity store and return no routed read. Never infer personal facts from a general question.\n\n"
+        "Examples:\n"
+        "User: What is my current salary? => entity_read, no memory_reads.\n"
+        "User: What did we decide last April? => episode_read, one episode read with the date and decision query.\n"
+        "User: How does a SIP work? => knowledge_read, one knowledge read.\n"
+        "User: I just changed jobs to TCS. => entity_update_and_episode_write, no routed read.\n"
+        "User: Never recommend equity to me again. => procedural_write, no routed read.\n"
+        "User: I'm worried about market volatility. => pattern_read, one pattern read.\n"
+        "User: What is the average salary for a Python developer? => none.\n"
+        "User: What is equity investing? => none."
     )
     results = []
     for case in dataset:
-        examples = [(text, case["operation"]) for text in case["utterances"]]
-        examples.extend((text, "none") for text in case.get("negatives", []))
-        for utterance, expected in examples:
+        examples = [(text, case["operation"], case.get("store")) for text in case["utterances"]]
+        for negative in case.get("negatives", []):
+            if isinstance(negative, str):
+                examples.append((negative, "none", None))
+            else:
+                examples.append((negative["utterance"], negative.get("operation", "none"), negative.get("store")))
+        for utterance, expected, expected_store in examples:
             decision = await router.ainvoke([
                 SystemMessage(content=prompt),
                 HumanMessage(content=utterance),
             ])
             intent = getattr(decision, "memory_intent", None)
             reads = getattr(decision, "memory_reads", [])
-            store = getattr(reads[0], "store", None) if reads else None
-            expected_store = case.get("store") if expected != "none" else None
-            passed = intent == expected and (expected_store is None or store == expected_store)
-            results.append({"id": case["id"], "utterance": utterance, "expected": expected, "actual": intent, "pass": passed})
+            store = (reads[0].get("store") if isinstance(reads[0], dict) else getattr(reads[0], "store", None)) if reads else None
+            reason = ""
+            if intent != expected:
+                reason = "intent mismatch"
+            elif expected_store is not None and store != expected_store:
+                reason = "memory store mismatch"
+            elif expected == "none" and reads:
+                reason = "unexpected memory read"
+            passed = not reason
+            results.append({
+                "id": case["id"], "utterance": utterance,
+                "expected": expected, "actual": intent,
+                "expected_store": expected_store, "actual_store": store,
+                "reason": reason, "pass": passed,
+            })
     return results
 
 
@@ -70,7 +97,11 @@ def main():
         failures = [result for result in results if not result["pass"]]
         for result in results:
             status = "PASS" if result["pass"] else "FAIL"
-            print(f"{status}\t{result['id']}\t{result['expected']}\t{result['actual']}\t{result['utterance']}")
+            print(
+                f"{status}\t{result['id']}\t{result['expected']}\t{result['actual']}\t"
+                f"{result['expected_store'] or '-'}\t{result['actual_store'] or '-'}\t"
+                f"{result['reason'] or '-'}\t{result['utterance']}"
+            )
         print(f"memory-routing: {len(results)-len(failures)}/{len(results)} pass")
         raise SystemExit(1 if failures else 0)
     print(f"Loaded {cases} cases for suite {args.suite}; no model calls were made.")
