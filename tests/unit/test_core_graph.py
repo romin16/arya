@@ -8,7 +8,9 @@ import httpx
 import pytest
 from cryptography.fernet import Fernet
 from langchain_core.messages import AIMessageChunk, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages.utils import convert_to_openai_messages
 from langchain_core.tools import StructuredTool
+from langchain_core.utils.function_calling import convert_to_openai_tool
 from langgraph.checkpoint.memory import MemorySaver
 
 import core.graph.runtime as runtime_module
@@ -20,7 +22,7 @@ from core.graph.runtime import (
     _scan_openai_payload,
     device_mcp_connection,
 )
-from core.mcp_adapters.google_workspace import GOOGLE_REQUIRED_SOURCES
+from core.mcp_adapters.google_workspace import GOOGLE_REQUIRED_SOURCES, adapt_google_tools
 from core.pii.vault import PIIVault
 from core.skills_runtime import SkillsRuntime
 
@@ -54,11 +56,11 @@ async def test_openai_request_guard_rejects_raw_email_and_accepts_token():
     guard = _scan_openai_payload(vault)
     raw_request = httpx.Request(
         "POST", "https://api.openai.com/v1/chat/completions",
-        json={"messages": [{"role": "user", "content": "arya.test@example.com"}]},
+        json={"messages": [{"role": "user", "content": "person@arya.dev"}]},
     )
-    with pytest.raises(ValueError, match="raw PII"):
+    with pytest.raises(ValueError, match="raw EMAIL"):
         await guard(raw_request)
-    token = vault.tokenise("arya.test@example.com")
+    token = vault.tokenise("person@arya.dev")
     token_request = httpx.Request(
         "POST", "https://api.openai.com/v1/chat/completions",
         json={"messages": [{"role": "user", "content": token}]},
@@ -131,17 +133,34 @@ class FakePool:
 
 
 class FakeAgentModel:
-    def __init__(self, raw_email):
+    def __init__(self, raw_email, vault):
         self.raw_email = raw_email
+        self.vault = vault
         self.calls = 0
         self.tool_args = None
+        self.bound_tools = []
+        self.outbound_payloads = []
 
     def bind_tools(self, tools):
+        self.bound_tools = tools
         self.bound_names = {tool.name for tool in tools}
         return self
 
     async def astream(self, messages):
         self.calls += 1
+        payload = {
+            "messages": convert_to_openai_messages(messages),
+            "tools": [convert_to_openai_tool(tool) for tool in self.bound_tools],
+        }
+        request = httpx.Request(
+            "POST",
+            "https://api.openai.com/v1/chat/completions",
+            json=payload,
+        )
+        await _scan_openai_payload(self.vault)(request)
+        outbound = request.content.decode("utf-8")
+        assert self.raw_email not in outbound
+        self.outbound_payloads.append(json.loads(outbound))
         rendered = repr(messages)
         assert self.raw_email not in rendered
         if self.calls == 1:
@@ -169,7 +188,7 @@ class FakeAgentModel:
 
 @pytest.mark.asyncio
 async def test_custom_graph_tokenises_tool_results_logs_actions_and_detokenises_stream():
-    raw_email = "arya.test@example.com"
+    raw_email = "person@arya.dev"
     vault = PIIVault(b"test-hmac-secret", Fernet.generate_key())
     pool = FakePool()
 
@@ -188,7 +207,8 @@ async def test_custom_graph_tokenises_tool_results_logs_actions_and_detokenises_
     runtime.saver = MemorySaver()
     runtime.skills = SkillsRuntime(Path(__file__).resolve().parents[2] / "skills")
     runtime.router_model = FakeRouter()
-    runtime.main_model = FakeAgentModel(raw_email)
+    agent_model = FakeAgentModel(raw_email, vault)
+    runtime.main_model = agent_model
     runtime.device_tools = {"whatsapp_send": device_tool}
     runtime.limits = {"max_tool_rounds": 8, "tool_timeout_seconds": 2, "token_budget": 100}
     runtime.persona = "Test persona"
@@ -216,6 +236,120 @@ async def test_custom_graph_tokenises_tool_results_logs_actions_and_detokenises_
     logged_args = pool.rows[0][1][3].obj
     assert raw_email not in json.dumps(logged_args)
     assert "[EMAIL_" in json.dumps(logged_args)
+    assert agent_model.outbound_payloads
+
+
+@pytest.mark.asyncio
+async def test_email_request_with_real_server_schemas_passes_strict_egress():
+    # Snapshot from FastMCP list_tools() at installed google-accounts-mcp
+    # commit 283988563f9af0c8f4886dde303c5a92d49cf571; examples are scrubbed.
+    fixture = Path(__file__).resolve().parents[1] / "fixtures" / "google_email_tool_schemas.json"
+    schema_rows = json.loads(fixture.read_text(encoding="utf-8"))
+    assert {row["name"] for row in schema_rows} == {
+        "search_email", "read_email", "read_thread", "draft_email", "send_email",
+        "modify_labels", "list_labels",
+    }
+    calls = []
+
+    class ServerTool:
+        def __init__(self, row):
+            self.name = row["name"]
+            self.description = row["description"]
+            self.args_schema = row["inputSchema"]
+
+        async def ainvoke(self, arguments):
+            calls.append((self.name, arguments))
+            return {"success": True}
+
+    raw_tools = [ServerTool(row) for row in schema_rows]
+    google_tools = adapt_google_tools(raw_tools)
+    raw_account = "self-recipient@arya.dev"
+    vault = PIIVault(b"request-test-hmac", Fernet.generate_key())
+    account_token = vault.tokenise(raw_account)
+    pool = FakePool()
+
+    class EmailRouter:
+        async def ainvoke(self, messages):
+            return RouteDecision(likely_skills=["email"])
+
+    class CapturingModel:
+        def __init__(self):
+            self.bound_tools = []
+            self.requests = []
+            self.calls = 0
+
+        def bind_tools(self, tools):
+            self.bound_tools = tools
+            return self
+
+        async def astream(self, messages):
+            self.calls += 1
+            payload = {
+                "messages": convert_to_openai_messages(messages),
+                "tools": [convert_to_openai_tool(tool) for tool in self.bound_tools],
+            }
+            request = httpx.Request(
+                "POST",
+                "https://api.openai.com/v1/chat/completions",
+                json=payload,
+            )
+            await _scan_openai_payload(vault)(request)
+            body = request.content.decode("utf-8")
+            assert raw_account not in body
+            assert "example.com" not in body
+            self.requests.append(json.loads(body))
+            system_text = next(message.content for message in messages if isinstance(message, SystemMessage))
+            assert account_token in system_text
+            assert raw_account not in system_text
+            assert "myself" in system_text
+            assert self.calls == 1
+            yield AIMessageChunk(
+                content="",
+                tool_call_chunks=[{
+                    "name": "gmail_send",
+                    "args": json.dumps({
+                        "to": [account_token],
+                        "subject": "Hello",
+                        "body": "hi",
+                    }),
+                    "id": "email-self",
+                    "index": 0,
+                }],
+            )
+
+    runtime = CoreGraphRuntime()
+    runtime.vault = vault
+    runtime.pool = pool
+    runtime.saver = MemorySaver()
+    runtime.skills = SkillsRuntime(Path(__file__).resolve().parents[2] / "skills")
+    runtime.router_model = EmailRouter()
+    model = CapturingModel()
+    runtime.main_model = model
+    runtime.tools = google_tools
+    runtime.authorized_account_token = account_token
+    runtime.limits = {"max_tool_rounds": 8, "tool_timeout_seconds": 2, "token_budget": 100}
+    runtime.persona = "Test persona"
+
+    async def load_skill(name: str) -> str:
+        return runtime.skills.load(name, [])[0]
+
+    runtime.load_skill_tool = StructuredTool.from_function(
+        coroutine=load_skill,
+        name="load_skill",
+        description="load a skill",
+    )
+    runtime.graph = runtime._build_graph()
+    events = [
+        event async for event in runtime.stream_turn(
+            SimpleNamespace(message="Send an email to myself saying hi.", user_id="user-test"),
+            "thread-real-email-schemas",
+        )
+    ]
+    response = "".join(event["chunk"] for event in events if "chunk" in event)
+    assert "approval flow is implemented" in response
+    assert "No email was sent" in response
+    assert model.requests
+    assert calls == []
 
 
 def test_required_google_sources_match_installed_server_surface():

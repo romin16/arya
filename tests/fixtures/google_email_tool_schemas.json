@@ -1,0 +1,325 @@
+[
+  {
+    "name": "search_email",
+    "description": "Search emails using Gmail search syntax (e.g. 'from:[email example removed]',\n    'is:unread', 'subject:hello'). Defaults to the configured\n    DEFAULT_ACCOUNT (or the sole authorized account) when account is\n    not specified.\n\n    message_ids: optional pre-filter set. When provided, the tool iterates\n      over these IDs instead of calling Gmail's search API and keeps only\n      the ones matching ``query``. Useful when you already have a candidate\n      set (e.g. exported from a Notion database) and want to avoid N blind\n      list_attachments calls. Currently only ``has:attachment`` is honored\n      as a local predicate — other query terms are ignored in pre-filter\n      mode.",
+    "inputSchema": {
+      "properties": {
+        "query": {
+          "title": "Query",
+          "type": "string"
+        },
+        "account": {
+          "default": "",
+          "title": "Account",
+          "type": "string"
+        },
+        "max_results": {
+          "default": 10,
+          "title": "Max Results",
+          "type": "integer"
+        },
+        "message_ids": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Message Ids"
+        }
+      },
+      "required": [
+        "query"
+      ],
+      "title": "search_emailArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "read_email",
+    "description": "Read the full content of an email by its message ID.\n    Use search_email first to find message IDs.",
+    "inputSchema": {
+      "properties": {
+        "message_id": {
+          "title": "Message Id",
+          "type": "string"
+        },
+        "account": {
+          "default": "",
+          "title": "Account",
+          "type": "string"
+        }
+      },
+      "required": [
+        "message_id"
+      ],
+      "title": "read_emailArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "read_thread",
+    "description": "Read all messages in an email thread by its thread ID.\n    Thread IDs are shown in search results and message details.",
+    "inputSchema": {
+      "properties": {
+        "thread_id": {
+          "title": "Thread Id",
+          "type": "string"
+        },
+        "account": {
+          "default": "",
+          "title": "Account",
+          "type": "string"
+        }
+      },
+      "required": [
+        "thread_id"
+      ],
+      "title": "read_threadArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "draft_email",
+    "description": "Create a draft email. The draft can be reviewed and sent from Gmail.\n\n    to / cc / bcc: lists of email addresses.\n    reply_to_message_id: set to turn the draft into a reply (stamps\n      In-Reply-To / References headers and preserves the thread).\n    attachments: list of unified source references. Each entry is:\n      - 'local:<path>'        — file under ATTACHMENTS_DIR (e.g.\n        'local:uploads/report.pdf' after upload_file, or\n        'local:<message_id>/<filename>' after download_attachment)\n      - 'shared:<filename>'   — file on the cross-MCP shared mount, e.g.\n        staged by notion_download_file(destination='shared'). Verify\n        with list_shared_files.\n      - 'drive:<name-or-id>'  — file in the shared DRIVE_FOLDER_NAME\n        Drive folder (populated via drive_upload)\n\n    ## Cross-MCP file transfer (Notion → Gmail)\n    To attach a Notion file to a draft:\n      1. notion-mcp/notion_download_file(block_id, destination='shared')\n      2. draft_email(..., attachments=['shared:<filename>'])\n    Bytes never traverse MCP parameters — no size limits.",
+    "inputSchema": {
+      "properties": {
+        "to": {
+          "items": {
+            "type": "string"
+          },
+          "title": "To",
+          "type": "array"
+        },
+        "subject": {
+          "title": "Subject",
+          "type": "string"
+        },
+        "body": {
+          "title": "Body",
+          "type": "string"
+        },
+        "account": {
+          "default": "",
+          "title": "Account",
+          "type": "string"
+        },
+        "cc": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cc"
+        },
+        "bcc": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Bcc"
+        },
+        "reply_to_message_id": {
+          "default": "",
+          "title": "Reply To Message Id",
+          "type": "string"
+        },
+        "attachments": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Attachments"
+        }
+      },
+      "required": [
+        "to",
+        "subject",
+        "body"
+      ],
+      "title": "draft_emailArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "send_email",
+    "description": "Send an email directly. Use with care — this dispatches immediately.\n\n    to / cc / bcc: lists of email addresses.\n    reply_to_message_id: set to send as a reply in an existing thread.\n    attachments: list of unified source references. Each entry is:\n      - 'local:<path>'        — file under ATTACHMENTS_DIR\n      - 'shared:<filename>'   — file on the cross-MCP shared mount, e.g.\n        staged by notion_download_file(destination='shared')\n      - 'drive:<name-or-id>'  — file in the shared DRIVE_FOLDER_NAME\n        Drive folder",
+    "inputSchema": {
+      "properties": {
+        "to": {
+          "items": {
+            "type": "string"
+          },
+          "title": "To",
+          "type": "array"
+        },
+        "subject": {
+          "title": "Subject",
+          "type": "string"
+        },
+        "body": {
+          "title": "Body",
+          "type": "string"
+        },
+        "account": {
+          "default": "",
+          "title": "Account",
+          "type": "string"
+        },
+        "cc": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cc"
+        },
+        "bcc": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Bcc"
+        },
+        "reply_to_message_id": {
+          "default": "",
+          "title": "Reply To Message Id",
+          "type": "string"
+        },
+        "attachments": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Attachments"
+        }
+      },
+      "required": [
+        "to",
+        "subject",
+        "body"
+      ],
+      "title": "send_emailArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "list_labels",
+    "description": "List all Gmail labels (system and user-created) for an account.",
+    "inputSchema": {
+      "properties": {
+        "account": {
+          "default": "",
+          "title": "Account",
+          "type": "string"
+        }
+      },
+      "title": "list_labelsArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "modify_labels",
+    "description": "Add or remove labels from a message. Pass label IDs as lists\n    (e.g. add_labels=['STARRED'], remove_labels=['INBOX', 'UNREAD']).",
+    "inputSchema": {
+      "properties": {
+        "message_id": {
+          "title": "Message Id",
+          "type": "string"
+        },
+        "add_labels": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Add Labels"
+        },
+        "remove_labels": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Remove Labels"
+        },
+        "account": {
+          "default": "",
+          "title": "Account",
+          "type": "string"
+        }
+      },
+      "required": [
+        "message_id"
+      ],
+      "title": "modify_labelsArguments",
+      "type": "object"
+    }
+  }
+]
