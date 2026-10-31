@@ -48,7 +48,7 @@ def test_google_mcp_connection_uses_local_streamable_http_and_token():
 
 
 @pytest.mark.asyncio
-async def test_google_aliases_wrap_every_tool_and_protected_actions_refuse_before_call():
+async def test_google_aliases_wrap_every_tool_and_allow_calls_from_the_approved_graph_path():
     calls = []
 
     async def record(**kwargs):
@@ -68,19 +68,16 @@ async def test_google_aliases_wrap_every_tool_and_protected_actions_refuse_befor
     assert set(GOOGLE_TOOL_SOURCES) <= adapted.keys()
     assert not any("drive" in name or "task" in name for name in adapted)
 
-    raw_send_count = len(calls)
-    send_refusal = await adapted["gmail_send"].ainvoke(
+    send_result = await adapted["gmail_send"].ainvoke(
         {"to": ["test@example.com"], "subject": "x", "body": "y"}
     )
-    delete_refusal = await adapted["gmail_delete"].ainvoke({"message_id": "message-id"})
-    assert send_refusal["approval_required"] is True
-    assert "approval flow" in send_refusal["message"]
-    assert delete_refusal["approval_required"] is True
-    assert "approval flow" in delete_refusal["message"]
-    assert len(calls) == raw_send_count == 0
+    delete_result = await adapted["gmail_delete"].ainvoke({"message_id": "message-id"})
+    assert send_result["success"] is True
+    assert delete_result["success"] is True
+    assert len(calls) == 2
 
     await adapted["gmail_search"].ainvoke({"query": "is:unread"})
-    assert len(calls) == 1
+    assert len(calls) == 3
 
 
 @pytest.mark.asyncio

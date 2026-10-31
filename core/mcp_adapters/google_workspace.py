@@ -33,15 +33,6 @@ class ReplyEmailArgs(BaseModel):
     attachments: list[str] | None = None
 
 
-BLOCKED_UNTIL_PHASE6 = {
-    "gmail_send": "Sending email is disabled until the Phase 6 approval flow is implemented. No email was sent.",
-    "gmail_reply": "Replying to email is disabled until the Phase 6 approval flow is implemented. No email was sent.",
-    "gmail_delete": "Moving email to Trash is disabled until the Phase 6 approval flow is implemented. No email was changed.",
-    "calendar_delete": "Deleting calendar events is disabled until the Phase 6 approval flow is implemented. No event was deleted.",
-    "calendar_delete_calendar": "Deleting calendars is disabled until the Phase 6 approval flow is implemented. No calendar was deleted.",
-    "contacts_delete": "Deleting contacts is disabled until the Phase 6 approval flow is implemented. No contact was deleted.",
-}
-
 GOOGLE_TOOL_SOURCES = {
     "google_list_accounts": "list_accounts",
     "gmail_search": "search_email",
@@ -118,7 +109,6 @@ def adapt_google_tools(
 
     for public_name, source_name in GOOGLE_TOOL_SOURCES.items():
         raw = raw_by_name.get(source_name)
-        refusal = BLOCKED_UNTIL_PHASE6.get(public_name)
         if public_name == "gmail_delete":
             def trash_message(args: dict[str, Any]) -> dict[str, Any]:
                 return {
@@ -130,11 +120,11 @@ def adapt_google_tools(
 
             transform = trash_message
             schema = DeleteEmailArgs
-            description = "Move a Gmail message to Trash. Requires approval (currently disabled)."
+            description = "Move a Gmail message to Trash. This action requires user approval."
         elif public_name == "gmail_reply":
             transform = None
             schema = ReplyEmailArgs
-            description = "Reply in the existing Gmail thread. Requires approval (currently disabled)."
+            description = "Reply in the existing Gmail thread. This action requires user approval."
         else:
             transform = None
             if raw:
@@ -154,7 +144,6 @@ def adapt_google_tools(
             retries=retries,
             args_schema=schema,
             transform=transform,
-            refusal=refusal,
         )
         tools[public_name] = adapter.as_langchain_tool()
     return tools

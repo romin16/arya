@@ -50,6 +50,12 @@ class ChatRequest(BaseModel):
     user_id: str
 
 
+class ApprovalRequest(BaseModel):
+    thread_id: str
+    decision: str
+    edited_args: list[dict] | None = None
+
+
 @app.get("/health")
 async def health():
     runtime = getattr(app.state, "runtime", None)
@@ -84,5 +90,12 @@ async def chat(req: ChatRequest):
 
 
 @app.post("/approve")
-async def approve(payload: dict):
-    return {"accepted": False, "detail": "No pending approval is active."}
+async def approve(payload: ApprovalRequest):
+    if payload.decision not in {"approve", "reject", "edit"}:
+        return {"accepted": False, "detail": "decision must be approve, reject, or edit."}
+    runtime = getattr(app.state, "runtime", None)
+    if runtime is None:
+        return {"accepted": False, "detail": "Core runtime has not started."}
+    return await runtime.resume_approval(
+        payload.thread_id, payload.decision, payload.edited_args,
+    )

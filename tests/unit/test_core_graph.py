@@ -135,6 +135,25 @@ async def test_sse_errors_emit_apology_error_activity_and_done():
     assert "raw error detail" not in response.text
 
 
+@pytest.mark.asyncio
+async def test_programmatic_approve_endpoint_forwards_decision_and_edits():
+    class ApprovalRuntime:
+        async def resume_approval(self, thread_id, decision, edited_args=None):
+            return {"accepted": True, "detail": f"{thread_id}:{decision}:{edited_args}"}
+
+    app.state.runtime = ApprovalRuntime()
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://core") as client:
+        response = await client.post("/approve", json={
+            "thread_id": "approval-thread", "decision": "edit", "edited_args": [{"body": "updated"}],
+        })
+    assert response.status_code == 200
+    assert response.json() == {
+        "accepted": True,
+        "detail": "approval-thread:edit:[{'body': 'updated'}]",
+    }
+
+
 class FakeRouter:
     async def ainvoke(self, messages):
         assert isinstance(messages[-1], HumanMessage)

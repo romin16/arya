@@ -25,6 +25,7 @@ from langchain_mcp_adapters.client import MultiServerMCPClient
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, MessagesState, StateGraph
+from langgraph.types import Command, interrupt
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 from pydantic import BaseModel, Field
@@ -120,6 +121,12 @@ class MemoryWrite(BaseModel):
     patterns: list[MemoryPattern] = Field(default_factory=list)
 
 
+class ApprovalClassification(BaseModel):
+    decision: Literal["approve", "reject", "edit", "unclear"]
+    edited_args: list[dict[str, Any]] | None = None
+    unrelated_command: bool = False
+
+
 class MemorySearchArgs(BaseModel):
     query: str = Field(description="What to recall from past conversations or stored knowledge")
     date: str | None = Field(default=None, description="Optional ISO date filter for past episodes")
@@ -155,6 +162,7 @@ class ARYAState(MessagesState, total=False):
     chosen_tools: list[str]
     procedural_tool_feedback: bool
     tool_rounds: int
+    approval_resuming: bool
 
 
 def device_mcp_connection(device_token: str) -> dict[str, Any]:
@@ -267,6 +275,34 @@ def _tool_content(value: Any, vault: PIIVault) -> str | list[dict[str, Any]]:
     return json.dumps(safe, ensure_ascii=False, default=str)
 
 
+def _approval_question(calls: list[dict[str, Any]], vault: PIIVault) -> str:
+    actions = []
+    for call in calls:
+        name = call["name"]
+        args = _detokenise_display(call.get("args", {}), vault)
+        if name == "gmail_send":
+            recipients = ", ".join(args.get("to", [])) if isinstance(args.get("to"), list) else str(args.get("to", ""))
+            action = (f"Send an email to {recipients}, subject {args.get('subject', '')!r}, "
+                      f"content {args.get('body', '')!r}?")
+        elif name == "gmail_reply":
+            recipients = ", ".join(args.get("to", [])) if isinstance(args.get("to"), list) else str(args.get("to", ""))
+            action = (f"Reply to {recipients}, subject {args.get('subject', '')!r}, "
+                      f"content {args.get('body', '')!r}?")
+        elif name == "whatsapp_send":
+            action = f"Send a WhatsApp message to {args.get('contact', 'the selected contact')}: {args.get('message', '')!r}?"
+        elif name == "whatsapp_voice_call":
+            action = f"Place a WhatsApp voice call to {args.get('contact', 'the selected contact')}?"
+        elif name in {"gmail_delete", "calendar_delete", "calendar_delete_calendar", "contacts_delete"}:
+            target = next((args[key] for key in ("subject", "title", "name", "message_id", "event_id", "resource_name") if args.get(key)), "the selected item")
+            action = f"Delete or trash {target!r} using {name}?"
+        elif name == "vscode_run_command":
+            action = f"Run this command in VS Code: {args.get('command', '')!r}?"
+        else:
+            action = f"Run {name} with {json.dumps(args, ensure_ascii=False, default=str)}?"
+        actions.append("- " + action)
+    return "Approve these actions?\n" + "\n".join(actions) + "\nReply yes or no."
+
+
 def _forget_items_text(items: list[dict[str, Any]], *, field: str = "preview") -> str:
     return "\n".join(
         f"- {item.get('store', 'memory')}: {item.get(field, item.get('reason', 'unknown item'))}"
@@ -375,6 +411,7 @@ class CoreGraphRuntime:
         self.http_client: httpx.AsyncClient | None = None
         self.main_model: ChatOpenAI | None = None
         self.router_model: Any = None
+        self.approval_model: Any = None
         self.graph = None
         self.limits: dict[str, Any] = {}
         self.pending_operation_ttl_seconds = 300
@@ -508,6 +545,7 @@ class CoreGraphRuntime:
             max_completion_tokens=int(self.limits["token_budget"]),
         )
         self.router_model = auxiliary.with_structured_output(RouteDecision)
+        self.approval_model = auxiliary.with_structured_output(ApprovalClassification)
         self.memory_writer_model = auxiliary.with_structured_output(MemoryWrite)
         self.memory_tools = {
             "memory_search": StructuredTool.from_function(
@@ -985,9 +1023,86 @@ class CoreGraphRuntime:
             memory_forget_message = None
             pending_forget = state.get("pending_forget")
             timeout = float(self.limits.get("tool_timeout_seconds", 30))
-            for call in assistant.tool_calls:
+            tool_calls = [dict(call) for call in assistant.tool_calls]
+            approval_calls = [
+                call for call in tool_calls
+                if call["name"] not in {"load_skill", "memory_search", "memory_forget"}
+                and hard_rule_for(call["name"], call["args"], state.get("procedures", [])) is None
+                and self.policy is not None
+                and self.policy.mode_for(call["name"], call["args"], tainted=bool(state.get("tainted"))) == "ask"
+            ]
+            approval_decision: dict[str, Any] | None = None
+            approved_args: dict[str, dict[str, Any]] = {}
+            approval_failed_message = None
+            approval_resuming = bool(state.get("approval_resuming"))
+            if approval_calls:
+                if self.policy is None or self.memory is None:
+                    approval_failed_message = "Approval is not set up yet. Nothing was changed."
+                else:
+                    question = _approval_question(approval_calls, self.vault)
+                    if not approval_resuming:
+                        safe_calls = [
+                            {"name": call["name"], "args": call["args"], "id": call["id"]}
+                            for call in tool_calls
+                        ]
+                        await self.memory.repositories.set_pending_operation(
+                            state["user_id"], state["thread_id"], "tool_approval",
+                            {"calls": safe_calls, "question": self.vault.tokenise(question)},
+                            ttl_seconds=self.policy.approval_timeout_seconds,
+                        )
+                        writer({"kind": "activity", "event": "Approval", "message": "Approval needed"})
+                        writer({"kind": "token", "text": question})
+                    approval_decision = interrupt({"type": "tool_approval", "question": self.vault.tokenise(question)})
+                    if not isinstance(approval_decision, dict):
+                        approval_decision = {"decision": "reject"}
+                    pending = await self.memory.repositories.get_pending_operation(
+                        state["user_id"], state["thread_id"],
+                    )
+                    if pending is None or pending["operation_type"] != "tool_approval":
+                        approval_decision = {"decision": "reject"}
+                        approval_failed_message = "The pending approval could not be verified. Nothing was changed."
+                    else:
+                        await self.memory.repositories.clear_pending_operation(
+                            state["user_id"], state["thread_id"], int(pending["id"]),
+                        )
+                    decision = approval_decision.get("decision")
+                    if decision != "approve":
+                        if decision == "expired":
+                            approval_failed_message = "That approval expired. Nothing was changed."
+                        elif decision == "edit":
+                            edits = approval_decision.get("edited_args") or []
+                            if len(edits) != len(approval_calls):
+                                approval_failed_message = "I couldn't apply those edits safely. Nothing was changed."
+                            else:
+                                approval_decision = {**approval_decision, "decision": "approve"}
+                        else:
+                            approval_failed_message = "Approval was rejected. Nothing was changed."
+                    if decision == "approve" or (decision == "edit" and approval_failed_message is None):
+                        edits = approval_decision.get("edited_args") or []
+                        for index, call in enumerate(approval_calls):
+                            safe_args = dict(call["args"])
+                            if decision == "edit":
+                                changes = edits[index]
+                                tool = self.tools.get(call["name"]) or self.device_tools.get(call["name"])
+                                schema = getattr(tool, "args_schema", None)
+                                fields = getattr(schema, "model_fields", None)
+                                allowed = set(fields) if fields else set(safe_args)
+                                if not isinstance(changes, dict) or set(changes) - allowed:
+                                    approval_failed_message = "I couldn't apply those edits safely. Nothing was changed."
+                                    break
+                                safe_args.update(_tokenise_result(changes, self.vault))
+                            approved_args[call["id"]] = safe_args
+                        if approval_failed_message:
+                            approved_args.clear()
+            elif approval_resuming:
+                # The graph should only be resumed for a pending, policy-checked call batch.
+                approval_decision = {"decision": "reject"}
+
+            for call in tool_calls:
                 name = call["name"]
-                safe_args = call["args"]
+                safe_args = approved_args.get(call["id"], call["args"])
+                if call["id"] in approved_args:
+                    call["args"] = safe_args
                 display_args = json.dumps(
                     _detokenise_display(safe_args, self.vault), ensure_ascii=False, default=str
                 )
@@ -1051,9 +1166,13 @@ class CoreGraphRuntime:
                             if self.policy is not None else "ask"
                         )
                         policy_refusal = None
-                        if mode == "block":
+                        if approval_failed_message:
+                            policy_refusal = approval_failed_message
+                        elif approval_decision and approval_decision.get("decision") != "approve":
+                            policy_refusal = "Approval was rejected. Nothing was changed."
+                        elif mode == "block":
                             policy_refusal = f"{name} is blocked by local policy. Nothing was changed."
-                        elif mode == "ask":
+                        elif mode == "ask" and call["id"] not in approved_args:
                             policy_refusal = f"Approval is not set up yet for {name}. Nothing was changed."
                         if policy_refusal:
                             refusal_message = policy_refusal
@@ -1123,10 +1242,11 @@ class CoreGraphRuntime:
                     "message": f"{name} {'completed' if status == 'success' else 'failed'}",
                 })
             return {
-                "messages": results,
+                "messages": ([assistant.model_copy(update={"tool_calls": tool_calls}, deep=True)] if approved_args else []) + results,
                 "active_skills": active_skills,
                 "refusal_message": refusal_message,
                 "memory_forget_message": memory_forget_message,
+                "approval_resuming": False,
                 **({"pending_forget": pending_forget} if "pending_forget" in locals() else {}),
             }
 
@@ -1279,23 +1399,123 @@ class CoreGraphRuntime:
             "tool_rounds": 0,
         }
         config = {"configurable": {"thread_id": session_id}}
-        async for event in self.graph.astream(input_state, config=config, stream_mode="custom"):
-            if not isinstance(event, dict):
-                continue
-            if event.get("kind") == "activity":
-                yield {
-                    "activity": {
-                        "event": event.get("event", "Query"),
-                        "message": self.vault.detokenise(str(event.get("message", ""))),
+
+        async def relay(graph_input):
+            async for event in self.graph.astream(graph_input, config=config, stream_mode="custom"):
+                if not isinstance(event, dict):
+                    continue
+                if event.get("kind") == "activity":
+                    yield {
+                        "activity": {
+                            "event": event.get("event", "Query"),
+                            "message": self.vault.detokenise(str(event.get("message", ""))),
+                        }
                     }
+                elif event.get("kind") == "token":
+                    chunk = stream_detokenizer.feed(str(event.get("text", "")))
+                    if chunk:
+                        yield {"chunk": chunk}
+            remaining = stream_detokenizer.feed("", final=True)
+            if remaining:
+                yield {"chunk": remaining}
+
+        if pending_operation and pending_operation.get("operation_type") == "tool_approval":
+            expired = pending_operation["expires_at"] <= datetime.now(timezone.utc)
+            classification: ApprovalClassification
+            if expired:
+                classification = ApprovalClassification(decision="reject")
+                resume_value = {"decision": "expired"}
+            elif self.approval_model is None:
+                classification = ApprovalClassification(decision="unclear")
+                resume_value = {"decision": "reject"}
+            else:
+                latest_text = self.vault.tokenise(request.message)
+                context = {
+                    "approval": pending_operation["payload"],
+                    "user_message": latest_text,
                 }
-            elif event.get("kind") == "token":
-                chunk = stream_detokenizer.feed(str(event.get("text", "")))
-                if chunk:
-                    yield {"chunk": chunk}
-        remaining = stream_detokenizer.feed("", final=True)
-        if remaining:
-            yield {"chunk": remaining}
+                classified = await self.approval_model.ainvoke([
+                    SystemMessage(content=(
+                        "Classify the user's next message about this pending tool action as approve, reject, edit, or unclear. "
+                        "Return approve only for a clear yes. Return reject for no/cancel. Return edit when the user gives "
+                        "changed action arguments; edited_args must contain one partial argument object per listed approval "
+                        "call, in order, with only changed fields. Set unrelated_command=true when the message asks for a "
+                        "separate task instead of deciding about the pending action. Never execute tools."
+                    )),
+                    HumanMessage(content=json.dumps(context, ensure_ascii=False, default=str)),
+                ])
+                classification = (
+                    classified if isinstance(classified, ApprovalClassification)
+                    else ApprovalClassification.model_validate(classified)
+                )
+                resume_value = classification.model_dump()
+            if classification.decision == "unclear":
+                yield {"activity": {"event": "Approval", "message": "Approval is still pending"}}
+                original_question = self.vault.detokenise(str(pending_operation["payload"].get("question", "")))
+                yield {"chunk": original_question + "\nI couldn't tell whether that was approval. Say yes, no, or describe an edit."}
+                return
+
+            if classification.unrelated_command and not expired:
+                # Resolve the old interrupt as rejected, then run this unrelated message normally.
+                try:
+                    async for _ in self.graph.astream(
+                        Command(update={"approval_resuming": True}, resume={"decision": "reject"}),
+                        config=config, stream_mode="custom",
+                    ):
+                        pass
+                    input_state["pending_operation"] = None
+                except Exception:
+                    logger.exception("Could not reject unrelated pending approval")
+                    yield {"chunk": "I couldn't resolve the pending approval. No action was taken."}
+                    return
+            else:
+                approval_input = Command(
+                    update={
+                        "approval_resuming": True,
+                    },
+                    resume=resume_value,
+                )
+                try:
+                    async for event in relay(approval_input):
+                        yield event
+                except Exception:
+                    logger.exception("Could not resume pending approval")
+                    yield {"chunk": "I couldn't resolve the pending approval. No action was taken."}
+                return
+
+        async for event in relay(input_state):
+            yield event
+
+    async def resume_approval(
+        self, thread_id: str, decision: str, edited_args: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        if self.graph is None or self.memory is None or self.vault is None:
+            return {"accepted": False, "detail": "Approval service is not initialized."}
+        user_id = getattr(self, "user_id", "")
+        pending = await self.memory.repositories.get_pending_operation(user_id, thread_id)
+        if not pending or pending.get("operation_type") != "tool_approval":
+            return {"accepted": False, "detail": "No pending approval is active."}
+        if pending["expires_at"] <= datetime.now(timezone.utc):
+            resume_value: dict[str, Any] = {"decision": "expired"}
+        elif decision == "edit":
+            if edited_args is None:
+                return {"accepted": False, "detail": "Edited arguments are required for an edit decision."}
+            resume_value = {"decision": "edit", "edited_args": edited_args}
+        else:
+            resume_value = {"decision": decision}
+        reply = []
+        config = {"configurable": {"thread_id": thread_id}}
+        try:
+            async for event in self.graph.astream(
+                Command(update={"approval_resuming": True}, resume=resume_value),
+                config=config, stream_mode="custom",
+            ):
+                if isinstance(event, dict) and event.get("kind") == "token":
+                    reply.append(self.vault.detokenise(str(event.get("text", ""))))
+        except Exception:
+            logger.exception("Programmatic approval resume failed")
+            return {"accepted": False, "detail": "The pending approval could not be resumed. No action was taken."}
+        return {"accepted": True, "detail": "".join(reply)}
 
 
 @asynccontextmanager

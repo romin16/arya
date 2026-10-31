@@ -12,6 +12,7 @@ from uuid import uuid4
 
 import psycopg
 import pytest
+import httpx
 from cryptography.fernet import Fernet
 from langchain_core.messages import AIMessageChunk, HumanMessage, ToolMessage
 from langchain_core.tools import StructuredTool
@@ -20,6 +21,7 @@ from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
 from core.graph.runtime import (
+    ApprovalClassification,
     CoreGraphRuntime,
     LoadSkillArgs,
     MemoryEntity,
@@ -27,9 +29,11 @@ from core.graph.runtime import (
     MemoryWrite,
     RouteDecision,
 )
+from core.app import app
 from core.memory.repositories import MemoryRepositories
 from core.memory.policy_gate import hard_rule_for
 from core.memory.service import MemoryService
+from core.policy_gate import ToolPolicy
 from core.pii.vault import PIIVault
 from core.skills_runtime import SkillsRuntime
 
@@ -521,5 +525,296 @@ async def test_patterns_promote_only_after_observations_across_two_days_and_skip
             )).fetchone()
         assert observed_after_management["count"] == 3
         assert observed_after_management["days"] == 2
+    finally:
+        await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_graph_approval_restores_self_recipient_and_executes_only_after_confirm():
+    database_url = os.environ["ARYA_TEST_DATABASE_URL"]
+    session = f"phase6-approval-{uuid4().hex}"
+    user_id = f"memory-user-{uuid4().hex}"
+    recipient = f"arya-{uuid4().hex[:8]}@arya.dev"
+    vault = None
+    calls = []
+
+    class Router:
+        async def ainvoke(self, messages):
+            return RouteDecision(likely_skills=["email"], memory_intent="none")
+
+    class Agent:
+        def __init__(self, address_token):
+            self.address_token = address_token
+            self.calls = 0
+
+        def bind_tools(self, tools):
+            self.bound_tools = tools
+            return self
+
+        async def astream(self, messages):
+            self.calls += 1
+            if self.calls == 1:
+                args = {"to": [self.address_token], "subject": "Hello", "body": "hi"}
+                yield AIMessageChunk(content="", tool_call_chunks=[{
+                    "name": "gmail_send", "args": json.dumps(args), "id": "approval-email", "index": 0,
+                }])
+            else:
+                yield AIMessageChunk(content="The email was sent.")
+
+    class Classifier:
+        async def ainvoke(self, messages):
+            return ApprovalClassification(decision="approve")
+
+    runtime = await _runtime(database_url, writer=ScriptedWriter(), session=session)
+    vault = runtime.vault
+    token = vault.tokenise(recipient)
+
+    async def send(to: list[str], subject: str, body: str):
+        calls.append({"to": to, "subject": subject, "body": body})
+        return {"success": True, "message": "sent"}
+
+    runtime.router_model = Router()
+    runtime.main_model = Agent(token)
+    runtime.approval_model = Classifier()
+    runtime.tools = {"gmail_send": StructuredTool.from_function(
+        coroutine=send, name="gmail_send", description="Send an email",
+    )}
+    runtime.device_tools = {}
+    runtime.policy = ToolPolicy({
+        "approval_timeout_seconds": 120,
+        "tools": {"*": {"mode": "auto"}, "gmail_send": {"mode": "ask"}},
+    }, {"gmail_send", "load_skill", "memory_search", "memory_forget"})
+    runtime.authorized_account_token = token
+    try:
+        question, _ = await _turn(runtime, "Send an email to myself saying hi.", user_id)
+        assert recipient in question
+        assert "content 'hi'" in question
+        assert calls == []
+        user_token = vault.tokenise(user_id)
+        pending = await runtime.memory.repositories.get_pending_operation(user_token, session)
+        assert pending and pending["operation_type"] == "tool_approval"
+        assert recipient not in json.dumps(pending["payload"])
+        assert token in json.dumps(pending["payload"])
+
+        reply, _ = await _turn(runtime, "yes", user_id)
+        assert reply == "The email was sent."
+        assert calls == [{"to": [recipient], "subject": "Hello", "body": "hi"}]
+        assert await runtime.memory.repositories.get_pending_operation(user_token, session) is None
+    finally:
+        await runtime.close()
+
+
+async def _approval_harness(database_url, session, user_id, recipient, decisions, tool_names=("gmail_send",)):
+    calls = []
+
+    class Router:
+        async def ainvoke(self, messages):
+            return RouteDecision(likely_skills=["email"], memory_intent="none")
+
+    class Agent:
+        def __init__(self, address_token):
+            self.address_token = address_token
+            self.call_number = 0
+
+        def bind_tools(self, tools):
+            self.bound_tools = tools
+            return self
+
+        async def astream(self, messages):
+            last_user_index = max(
+                index for index, message in enumerate(messages) if isinstance(message, HumanMessage)
+            )
+            last_user = str(messages[last_user_index].content).casefold()
+            has_result = any(isinstance(message, ToolMessage) for message in messages[last_user_index + 1:])
+            if has_result:
+                yield AIMessageChunk(content="The email was sent.")
+            elif "email" in last_user or "send" in last_user:
+                calls_for_turn = []
+                for index, name in enumerate(tool_names):
+                    args = {"to": [self.address_token], "subject": "Hello", "body": "hi"}
+                    if name == "gmail_reply":
+                        args["reply_to_message_id"] = "mock-thread"
+                    calls_for_turn.append({
+                        "name": name, "args": json.dumps(args),
+                        "id": f"approval-{self.call_number}-{index}", "index": index,
+                    })
+                self.call_number += 1
+                yield AIMessageChunk(content="", tool_call_chunks=calls_for_turn)
+            else:
+                yield AIMessageChunk(content="Handled unrelated request.")
+
+    class Classifier:
+        def __init__(self, configured):
+            self.configured = list(configured)
+            self.calls = 0
+
+        async def ainvoke(self, messages):
+            result = self.configured[self.calls]
+            self.calls += 1
+            return result
+
+    runtime = await _runtime(database_url, writer=ScriptedWriter(), session=session)
+    vault = runtime.vault
+    token = vault.tokenise(recipient)
+
+    async def email_tool(to: list[str], subject: str, body: str, reply_to_message_id: str = ""):
+        calls.append({
+            "to": to, "subject": subject, "body": body,
+            "reply_to_message_id": reply_to_message_id,
+        })
+        return {"success": True, "message": "sent"}
+
+    runtime.router_model = Router()
+    runtime.main_model = Agent(token)
+    runtime.approval_model = Classifier(decisions)
+    runtime.tools = {
+        name: StructuredTool.from_function(coroutine=email_tool, name=name, description="Mock email action")
+        for name in tool_names
+    }
+    runtime.device_tools = {}
+    registered = set(runtime.tools) | set(runtime.memory_tools) | {"load_skill"}
+    runtime.policy = ToolPolicy({
+        "approval_timeout_seconds": 120,
+        "tools": {"*": {"mode": "auto"}, **{name: {"mode": "ask"} for name in tool_names}},
+    }, registered)
+    runtime.authorized_account_token = token
+    runtime.user_id = vault.tokenise(user_id)
+    return runtime, calls, vault, token
+
+
+@pytest.mark.asyncio
+async def test_approval_edits_change_executed_arguments():
+    database_url = os.environ["ARYA_TEST_DATABASE_URL"]
+    session = f"phase6-edit-{uuid4().hex}"
+    user_id = f"memory-user-{uuid4().hex}"
+    old_email = f"old-{uuid4().hex[:8]}@arya.dev"
+    new_email = f"new-{uuid4().hex[:8]}@arya.dev"
+    runtime, calls, vault, _ = await _approval_harness(
+        database_url, session, user_id, old_email,
+        [ApprovalClassification(decision="edit", edited_args=[{"to": [new_email], "body": "Updated"}])],
+    )
+    try:
+        question, _ = await _turn(runtime, "Send an email to myself saying hi.", user_id)
+        assert old_email in question
+        reply, _ = await _turn(runtime, f"Change it to {new_email} and say Updated.", user_id)
+        assert reply == "The email was sent."
+        assert calls == [{
+            "to": [new_email], "subject": "Hello", "body": "Updated", "reply_to_message_id": "",
+        }]
+    finally:
+        await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_approval_edit_with_unknown_argument_is_refused_safely():
+    database_url = os.environ["ARYA_TEST_DATABASE_URL"]
+    session = f"phase6-invalid-edit-{uuid4().hex}"
+    user_id = f"memory-user-{uuid4().hex}"
+    recipient = f"invalid-{uuid4().hex[:8]}@arya.dev"
+    runtime, calls, _, _ = await _approval_harness(
+        database_url, session, user_id, recipient,
+        [ApprovalClassification(decision="edit", edited_args=[{"send_all_money": True}])],
+    )
+    try:
+        await _turn(runtime, "Send an email to myself saying hi.", user_id)
+        reply, _ = await _turn(runtime, "Change the action.", user_id)
+        assert "couldn't apply those edits safely" in reply
+        assert calls == []
+    finally:
+        await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_unclear_reasks_rejection_cancels_and_never_calls_tool():
+    database_url = os.environ["ARYA_TEST_DATABASE_URL"]
+    session = f"phase6-reject-{uuid4().hex}"
+    user_id = f"memory-user-{uuid4().hex}"
+    recipient = f"reject-{uuid4().hex[:8]}@arya.dev"
+    runtime, calls, vault, _ = await _approval_harness(
+        database_url, session, user_id, recipient,
+        [ApprovalClassification(decision="unclear"), ApprovalClassification(decision="reject")],
+    )
+    try:
+        question, _ = await _turn(runtime, "Send an email to myself saying hi.", user_id)
+        reask, _ = await _turn(runtime, "maybe", user_id)
+        assert question in reask
+        assert "couldn't tell" in reask
+        assert await runtime.memory.repositories.get_pending_operation(vault.tokenise(user_id), session) is not None
+        rejected, _ = await _turn(runtime, "no", user_id)
+        assert "Approval was rejected" in rejected
+        assert calls == []
+        assert await runtime.memory.repositories.get_pending_operation(vault.tokenise(user_id), session) is None
+    finally:
+        await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_expired_approval_is_rejected_without_classification_or_side_effect():
+    database_url = os.environ["ARYA_TEST_DATABASE_URL"]
+    session = f"phase6-expired-{uuid4().hex}"
+    user_id = f"memory-user-{uuid4().hex}"
+    recipient = f"expired-{uuid4().hex[:8]}@arya.dev"
+    runtime, calls, vault, _ = await _approval_harness(
+        database_url, session, user_id, recipient, [],
+    )
+    try:
+        await _turn(runtime, "Send an email to myself saying hi.", user_id)
+        async with runtime.pool.connection() as conn:
+            await conn.execute(
+                "UPDATE pending_operations SET expires_at=now()-interval '1 second' WHERE user_id=%s AND thread_id=%s",
+                (vault.tokenise(user_id), session),
+            )
+        reply, _ = await _turn(runtime, "yes", user_id)
+        assert "expired" in reply.casefold()
+        assert calls == []
+        assert await runtime.memory.repositories.get_pending_operation(vault.tokenise(user_id), session) is None
+    finally:
+        await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_multiple_approval_tools_are_bundled_into_one_interrupt_and_post_approve_works():
+    database_url = os.environ["ARYA_TEST_DATABASE_URL"]
+    session = f"phase6-bundle-{uuid4().hex}"
+    user_id = f"memory-user-{uuid4().hex}"
+    recipient = f"bundle-{uuid4().hex[:8]}@arya.dev"
+    runtime, calls, vault, _ = await _approval_harness(
+        database_url, session, user_id, recipient, [], tool_names=("gmail_send", "gmail_reply"),
+    )
+    try:
+        question, _ = await _turn(runtime, "Send an email and reply to my email.", user_id)
+        assert question.count("Approve these actions?") == 1
+        assert "Send an email to" in question
+        assert "Reply to" in question
+        app.state.runtime = runtime
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://core") as client:
+            response = await client.post("/approve", json={"thread_id": session, "decision": "approve"})
+        assert response.status_code == 200
+        assert response.json()["accepted"] is True
+        assert calls == [
+            {"to": [recipient], "subject": "Hello", "body": "hi", "reply_to_message_id": ""},
+            {"to": [recipient], "subject": "Hello", "body": "hi", "reply_to_message_id": "mock-thread"},
+        ]
+    finally:
+        app.state.runtime = None
+        await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_unrelated_message_rejects_pending_action_then_runs_as_new_turn():
+    database_url = os.environ["ARYA_TEST_DATABASE_URL"]
+    session = f"phase6-unrelated-{uuid4().hex}"
+    user_id = f"memory-user-{uuid4().hex}"
+    recipient = f"unrelated-{uuid4().hex[:8]}@arya.dev"
+    runtime, calls, _, _ = await _approval_harness(
+        database_url, session, user_id, recipient,
+        [ApprovalClassification(decision="reject", unrelated_command=True)],
+    )
+    try:
+        await _turn(runtime, "Send an email to myself saying hi.", user_id)
+        reply, _ = await _turn(runtime, "What's the weather today?", user_id)
+        assert reply == "Handled unrelated request."
+        assert calls == []
     finally:
         await runtime.close()
