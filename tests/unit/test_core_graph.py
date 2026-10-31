@@ -1,5 +1,7 @@
 import json
+import logging
 import re
+from io import StringIO
 from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -22,6 +24,7 @@ from core.graph.runtime import (
     _scan_openai_payload,
     device_mcp_connection,
 )
+from core.__main__ import FlushingStreamHandler
 from core.mcp_adapters.google_workspace import GOOGLE_REQUIRED_SOURCES, adapt_google_tools
 from core.pii.vault import PIIVault
 from core.skills_runtime import SkillsRuntime
@@ -34,6 +37,24 @@ def test_device_mcp_connection_uses_requested_trailing_slash_and_bearer():
         "url": "http://127.0.0.1:5002/mcp/",
         "headers": {"Authorization": "Bearer only-a-test-token"},
     }
+
+
+def test_core_log_handler_flushes_each_line():
+    class FlushTrackingStream(StringIO):
+        flush_count = 0
+
+        def flush(self):
+            self.flush_count += 1
+            super().flush()
+
+    stream = FlushTrackingStream()
+    handler = FlushingStreamHandler(stream)
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    handler.emit(logging.LogRecord(
+        "arya.core", logging.INFO, __file__, 1, "chat_decision route=none tool=none", (), None,
+    ))
+    assert stream.getvalue() == "chat_decision route=none tool=none\n"
+    assert stream.flush_count >= 1
 
 
 def test_system_rules_trust_user_and_only_treat_tool_results_as_untrusted():
