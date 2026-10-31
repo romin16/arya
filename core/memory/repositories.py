@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import json
 from collections import defaultdict
-from datetime import datetime
 from typing import Any
 
 from psycopg.types.json import Jsonb
@@ -39,27 +37,30 @@ class MemoryRepositories:
 
     async def upsert_entity(self, user_id: str, key: str, value: Any, *, source: str = "conversation", confidence: float = 1.0):
         async with self.pool.connection() as conn:
-            cur = await conn.execute(
-                "SELECT id FROM entities WHERE user_id=%s AND key=%s AND valid_to IS NULL",
-                (user_id, key),
-            )
-            old = await cur.fetchone()
-            if old:
+            async with conn.transaction():
+                cur = await conn.execute(
+                    "SELECT id FROM entities WHERE user_id=%s AND key=%s AND valid_to IS NULL FOR UPDATE",
+                    (user_id, key),
+                )
+                old = await cur.fetchone()
+                if old:
+                    # Close the current version before inserting to satisfy the
+                    # partial unique index; link it after the new id is known.
+                    await conn.execute(
+                        "UPDATE entities SET valid_to=now(),superseded_by=NULL WHERE id=%s",
+                        (old["id"],),
+                    )
                 cur = await conn.execute(
                     "INSERT INTO entities(user_id,key,value,confidence,source) VALUES(%s,%s,%s,%s,%s) RETURNING id",
                     (user_id, key, Jsonb(value), confidence, source),
                 )
                 new = await cur.fetchone()
-                await conn.execute(
-                    "UPDATE entities SET valid_to=now(),superseded_by=%s WHERE id=%s",
-                    (new["id"], old["id"]),
-                )
+                if old:
+                    await conn.execute(
+                        "UPDATE entities SET superseded_by=%s WHERE id=%s",
+                        (new["id"], old["id"]),
+                    )
                 return new["id"]
-            cur = await conn.execute(
-                "INSERT INTO entities(user_id,key,value,confidence,source) VALUES(%s,%s,%s,%s,%s) RETURNING id",
-                (user_id, key, Jsonb(value), confidence, source),
-            )
-            return (await cur.fetchone())["id"]
 
     async def active_procedures(self, user_id: str) -> list[dict[str, Any]]:
         async with self.pool.connection() as conn:
@@ -173,10 +174,17 @@ class MemoryRepositories:
                 ("patterns", "text", "status='active'"),
                 ("episodes", "summary", "true"),
             ):
-                cur = await conn.execute(
-                    f"SELECT id,{text_field} AS preview FROM {table} WHERE user_id=%s AND {where} AND {text_field} ILIKE %s ORDER BY id LIMIT 50",
-                    (user_id, f"%{query}%"),
-                )
+                if table == "entities":
+                    cur = await conn.execute(
+                        """SELECT id,key AS preview FROM entities WHERE user_id=%s AND valid_to IS NULL
+                           AND (key ILIKE %s OR value::text ILIKE %s) ORDER BY id LIMIT 50""",
+                        (user_id, f"%{query}%", f"%{query}%"),
+                    )
+                else:
+                    cur = await conn.execute(
+                        f"SELECT id,{text_field} AS preview FROM {table} WHERE user_id=%s AND {where} AND {text_field} ILIKE %s ORDER BY id LIMIT 50",
+                        (user_id, f"%{query}%"),
+                    )
                 results.extend({"store": table, **row} for row in await cur.fetchall())
             return results
 
@@ -205,11 +213,56 @@ class MemoryRepositories:
     async def consolidate(self, user_id: str):
         async with self.pool.connection() as conn:
             await conn.execute(
+                """WITH ranked AS (
+                     SELECT id, first_value(id) OVER (PARTITION BY lower(trim(key)) ORDER BY valid_from DESC,id DESC) AS keeper
+                     FROM entities WHERE user_id=%s AND valid_to IS NULL
+                   )
+                   UPDATE entities AS e SET valid_to=now(),superseded_by=r.keeper
+                   FROM ranked r WHERE e.id=r.id AND r.id<>r.keeper""",
+                (user_id,),
+            )
+            # Keep the strongest active representative for duplicate patterns and
+            # fold the duplicate evidence into it before marking the rest merged.
+            await conn.execute(
+                """WITH ranked AS (
+                     SELECT id, first_value(id) OVER (PARTITION BY lower(trim(text)) ORDER BY confidence DESC, evidence_count DESC, id) AS keeper,
+                            sum(evidence_count) OVER (PARTITION BY lower(trim(text))) AS evidence,
+                            max(confidence) OVER (PARTITION BY lower(trim(text))) AS confidence
+                     FROM patterns WHERE user_id=%s AND status='active'
+                   ), keepers AS (
+                     UPDATE patterns AS p SET evidence_count=r.evidence, confidence=r.confidence, last_seen=now()
+                     FROM ranked r WHERE p.id=r.keeper AND p.status='active' RETURNING p.id
+                   )
+                   UPDATE patterns AS p SET status='merged'
+                   FROM ranked r WHERE p.id=r.id AND r.id<>r.keeper""",
+                (user_id,),
+            )
+            await conn.execute(
                 "UPDATE patterns SET confidence=GREATEST(0.05,confidence*0.98) WHERE user_id=%s AND status='active' AND last_seen < now()-interval '30 days'",
                 (user_id,),
             )
             await conn.execute(
                 "UPDATE patterns SET status='stale' WHERE user_id=%s AND status='active' AND confidence < 0.15",
+                (user_id,),
+            )
+            # Compact older episodic threads into a stable summary column before
+            # keeping their full body available for hybrid retrieval.
+            await conn.execute(
+                """UPDATE episodes SET summary=left(coalesce(nullif(summary,''),body,''),1200)
+                   WHERE user_id=%s AND ts < now()-interval '90 days'
+                     AND coalesce(summary,'')='' AND coalesce(body,'')<>''""",
+                (user_id,),
+            )
+            await conn.execute(
+                """WITH thread_summaries AS (
+                     SELECT thread_id, max(id) AS latest_id,
+                            left(string_agg(coalesce(nullif(summary,''),body,''), E'\\n' ORDER BY ts),1200) AS summary
+                     FROM episodes WHERE user_id=%s AND thread_id IS NOT NULL
+                       AND ts < now()-interval '90 days'
+                     GROUP BY thread_id
+                   )
+                   UPDATE episodes AS e SET summary=s.summary
+                   FROM thread_summaries s WHERE e.id=s.latest_id""",
                 (user_id,),
             )
 

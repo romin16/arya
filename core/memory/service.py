@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from core.memory.repositories import MemoryRepositories
@@ -16,6 +17,11 @@ class MemoryService:
         return self.vault.tokenise(text)
 
     async def always_context(self, user_id: str, *, token_budget: int = 600) -> str:
+        text, _ = await self.always_context_and_procedures(user_id, token_budget=token_budget)
+        return text
+
+    async def always_context_and_procedures(self, user_id: str, *, token_budget: int = 600):
+        user_id = self.safe_text(user_id)
         entities, procedures = await _parallel(
             self.repositories.current_entities(user_id),
             self.repositories.active_procedures(user_id),
@@ -29,9 +35,10 @@ class MemoryService:
                 f"(tool pattern: {procedure['tool_pattern'] or '*'})"
             )
         text = "\n".join(rows)
-        return text[: token_budget * 4]
+        return text[: token_budget * 4], procedures
 
     async def routed_reads(self, user_id: str, reads: list[Any]) -> str:
+        user_id = self.safe_text(user_id)
         tasks = []
         labels = []
         for read in reads:
@@ -65,6 +72,7 @@ class MemoryService:
         return "\n".join(lines)
 
     async def search(self, user_id: str, query: str, *, date: str | None = None) -> dict[str, Any]:
+        user_id = self.safe_text(user_id)
         safe_query = self.safe_text(query)
         vector = await self.embed_query(safe_query)
         episodes, knowledge, patterns = await _parallel(
@@ -75,19 +83,18 @@ class MemoryService:
         return {"episodes": episodes, "knowledge": knowledge, "patterns": patterns}
 
     async def forget(self, user_id: str, query: str, *, confirm: bool = False) -> dict[str, Any]:
+        user_id = self.safe_text(user_id)
         safe_query = self.safe_text(query)
         candidates = await self.repositories.search_forget_candidates(user_id, safe_query)
-        if not confirm:
-            return {
-                "deleted": 0,
-                "confirmation_required": bool(candidates),
-                "will_delete": candidates,
-                "message": "Review this list. Nothing has been deleted.",
-            }
-        deleted = await self.repositories.delete_candidates(user_id, candidates)
-        return {"deleted": deleted, "confirmation_required": False, "deleted_items": candidates}
+        return {
+            "deleted": 0,
+            "confirmation_required": bool(candidates),
+            "will_delete": candidates,
+            "message": "Review this list. Nothing has been deleted.",
+        }
 
     async def write_records(self, user_id: str, thread_id: str, records: dict[str, Any]) -> None:
+        user_id = self.safe_text(user_id)
         for entity in records.get("entities", []):
             await self.repositories.upsert_entity(
                 user_id,
@@ -97,12 +104,17 @@ class MemoryService:
                 confidence=float(entity.get("confidence", 1.0)),
             )
         for rule in records.get("procedures", []):
+            tool_pattern = rule.get("tool_pattern")
+            rule_text = self.safe_text(str(rule["rule_text"]))
+            severity = str(rule.get("severity", "soft")).casefold()
+            if re.match(r"\s*(?:never|do not|don't)\b", rule_text, re.I):
+                severity = "hard"
             await self.repositories.add_procedure(
                 user_id,
-                self.safe_text(str(rule["rule_text"])),
+                rule_text,
                 scope=self.safe_text(str(rule.get("scope", "global"))),
-                tool_pattern=rule.get("tool_pattern"),
-                severity=rule.get("severity", "soft"),
+                tool_pattern=self.safe_text(str(tool_pattern)) if tool_pattern else None,
+                severity=severity,
             )
         episode = records.get("episode")
         if episode:
@@ -110,9 +122,9 @@ class MemoryService:
             summary = self.safe_text(str(episode.get("summary", "")))
             vector = await self.embed_query(summary + " " + body)
             await self.repositories.add_episode(
-                user_id, thread_id, summary, body, vector,
+                user_id, self.safe_text(thread_id), summary, body, vector,
                 topics=[self.safe_text(str(item)) for item in episode.get("topics", [])],
-                tools_used=episode.get("tools_used", []),
+                tools_used=[self.safe_text(str(item)) for item in episode.get("tools_used", [])],
             )
         for pattern in records.get("patterns", []):
             text = self.safe_text(str(pattern["text"]))
@@ -122,6 +134,18 @@ class MemoryService:
                 confidence=float(pattern.get("confidence", 0.5)),
                 evidence_count=int(pattern.get("evidence_count", 1)),
             )
+
+    async def add_knowledge(self, user_id: str, title: str, source: str, text: str, *, chunk_idx: int = 0, metadata=None):
+        user_id = self.safe_text(user_id)
+        safe_title = self.safe_text(title)
+        safe_source = self.safe_text(source)
+        safe_body = self.safe_text(text)
+        vector = await self.embed_query(safe_body)
+        return await self.repositories.add_knowledge_chunk(
+            user_id, safe_title, safe_source, safe_body, vector,
+            chunk_idx=chunk_idx,
+            metadata=self._safe_value(metadata or {}),
+        )
 
     def _safe_value(self, value):
         if isinstance(value, str):
