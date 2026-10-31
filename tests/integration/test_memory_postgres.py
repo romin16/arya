@@ -964,3 +964,102 @@ async def test_untrusted_search_result_taints_turn_and_escalates_auto_create_to_
         assert any(event.get("activity", {}).get("event") == "Approval" for event in events)
     finally:
         await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_turn_token_cap_returns_honest_message_without_calling_model():
+    database_url = os.environ["ARYA_TEST_DATABASE_URL"]
+    session = f"phase6-token-cap-{uuid4().hex}"
+    user_id = f"memory-user-{uuid4().hex}"
+
+    class Router:
+        calls = 0
+
+        async def ainvoke(self, messages):
+            self.calls += 1
+            return RouteDecision(memory_intent="none")
+
+    class Agent:
+        calls = 0
+
+        def bind_tools(self, tools):
+            return self
+
+        async def astream(self, messages):
+            self.calls += 1
+            raise AssertionError("The assistant model must not run after the turn token budget is exhausted")
+            yield
+
+    class EmptyWriter:
+        async def ainvoke(self, messages):
+            return MemoryWrite()
+
+    runtime = await _runtime(database_url, writer=EmptyWriter(), session=session)
+    router = Router()
+    agent = Agent()
+    runtime.router_model = router
+    runtime.main_model = agent
+    runtime.limits = {"max_tool_rounds": 8, "token_budget": 100, "turn_token_budget": 20}
+    try:
+        reply, _ = await _turn(runtime, "Tell me something harmless.", user_id)
+        assert "token limit" in reply.casefold()
+        assert "unfinished actions happened" in reply.casefold()
+        assert router.calls == 0
+        assert agent.calls == 0
+    finally:
+        await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_tool_round_cap_stops_before_extra_tool_and_does_not_claim_it_succeeded():
+    database_url = os.environ["ARYA_TEST_DATABASE_URL"]
+    session = f"phase6-tool-cap-{uuid4().hex}"
+    user_id = f"memory-user-{uuid4().hex}"
+    calls = []
+
+    class Router:
+        async def ainvoke(self, messages):
+            return RouteDecision(likely_skills=["whatsapp"], memory_intent="none")
+
+    class Agent:
+        def __init__(self):
+            self.calls = 0
+
+        def bind_tools(self, tools):
+            return self
+
+        async def astream(self, messages):
+            self.calls += 1
+            yield AIMessageChunk(content="", tool_call_chunks=[{
+                "name": "whatsapp_send",
+                "args": json.dumps({"contact": "Test Contact", "message": "Hi"}),
+                "id": f"round-{self.calls}", "index": 0,
+            }])
+
+    class EmptyWriter:
+        async def ainvoke(self, messages):
+            return MemoryWrite()
+
+    async def send(contact: str, message: str):
+        calls.append((contact, message))
+        return {"success": True}
+
+    runtime = await _runtime(database_url, writer=EmptyWriter(), session=session)
+    runtime.router_model = Router()
+    runtime.main_model = Agent()
+    runtime.tools = {"whatsapp_send": StructuredTool.from_function(
+        coroutine=send, name="whatsapp_send", description="Mock send",
+    )}
+    runtime.device_tools = {}
+    runtime.policy = ToolPolicy({"tools": {"*": {"mode": "auto"}}}, {
+        "whatsapp_send", "load_skill", "memory_search", "memory_forget",
+    })
+    runtime.limits = {"max_tool_rounds": 1, "token_budget": 100, "turn_token_budget": 12000}
+    try:
+        reply, _ = await _turn(runtime, "Send a WhatsApp message to Test Contact", user_id)
+        assert "tool-call limit" in reply.casefold()
+        assert "unfinished actions happened" in reply.casefold()
+        assert calls == [("Test Contact", "Hi")]
+        assert runtime.main_model.calls == 2
+    finally:
+        await runtime.close()

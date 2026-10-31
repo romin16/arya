@@ -9,6 +9,7 @@ import os
 import re
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
 from zoneinfo import ZoneInfo
@@ -17,6 +18,7 @@ from uuid import uuid4
 import httpx
 import psycopg
 import yaml
+import tiktoken
 from dotenv import load_dotenv
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import StructuredTool
@@ -164,6 +166,8 @@ class ARYAState(MessagesState, total=False):
     tool_rounds: int
     approval_resuming: bool
     system_prompt: str
+    token_used: int
+    token_limit_reached: bool
 
 
 def device_mcp_connection(device_token: str) -> dict[str, Any]:
@@ -243,6 +247,39 @@ def _text_value(value: Any) -> str:
         if text:
             return "".join(text)
     return ""
+
+
+@lru_cache(maxsize=1)
+def _tokenizer():
+    return tiktoken.get_encoding("cl100k_base")
+
+
+def _count_prompt_tokens(messages: list[Any], tools: list[Any] | None = None) -> int:
+    parts = []
+    for message in messages:
+        parts.append(str(getattr(message, "type", "message")))
+        parts.append(_text_value(getattr(message, "content", "")))
+        calls = getattr(message, "tool_calls", None)
+        if calls:
+            parts.append(json.dumps(calls, ensure_ascii=False, default=str))
+    for tool in tools or []:
+        schema = getattr(tool, "args_schema", None)
+        if hasattr(schema, "model_json_schema"):
+            schema = schema.model_json_schema()
+        parts.append(json.dumps({
+            "name": getattr(tool, "name", ""),
+            "description": getattr(tool, "description", ""),
+            "schema": schema,
+        }, ensure_ascii=False, default=str))
+    text = "\n".join(parts)
+    return len(_tokenizer().encode(text)) + 4 * len(messages)
+
+
+def _count_output_tokens(content: Any, tool_calls: Any = None) -> int:
+    text = _text_value(content)
+    if tool_calls:
+        text += json.dumps(tool_calls, ensure_ascii=False, default=str)
+    return len(_tokenizer().encode(text))
 
 
 def _tokenise_result(value: Any, vault: PIIVault) -> Any:
@@ -971,9 +1008,22 @@ class CoreGraphRuntime:
                 "to resolve the reference. Never invent memory facts.\n\n"
                 f"Skill index:\n{index}\nLast action: {json.dumps(last_action, ensure_ascii=False) if last_action else 'none'}"
             )
-            decision = await self.router_model.ainvoke(
-                [SystemMessage(content=prompt), HumanMessage(content=_text_value(latest.content))]
-            )
+            route_messages = [SystemMessage(content=prompt), HumanMessage(content=_text_value(latest.content))]
+            turn_budget = max(1, int(self.limits.get("turn_token_budget", 12000)))
+            token_used = int(state.get("token_used", 0))
+            route_input_tokens = _count_prompt_tokens(route_messages)
+            token_limit_reached = token_used + route_input_tokens >= turn_budget
+            if token_limit_reached:
+                decision = RouteDecision(memory_intent="none")
+                token_used = turn_budget
+            else:
+                router_model = self.router_model
+                if hasattr(router_model, "bind"):
+                    router_model = router_model.bind(max_completion_tokens=turn_budget - token_used - route_input_tokens)
+                decision = await router_model.ainvoke(route_messages)
+                decision_payload = decision.model_dump() if isinstance(decision, RouteDecision) else decision
+                token_used += route_input_tokens + _count_output_tokens(json.dumps(decision_payload, ensure_ascii=False, default=str))
+                token_limit_reached = token_used >= turn_budget
             likely = decision.likely_skills if isinstance(decision, RouteDecision) else decision.get("likely_skills", [])
             reads = decision.memory_reads if isinstance(decision, RouteDecision) else decision.get("memory_reads", [])
             model_route = decision.memory_intent if isinstance(decision, RouteDecision) else decision.get("memory_intent", "none")
@@ -1017,7 +1067,8 @@ class CoreGraphRuntime:
                                   "result_summary": json.dumps(result, ensure_ascii=False, default=str)}],
                     )
                 return {"route_label": route_label, "chosen_tools": ["memory_forget"],
-                        "memory_forget_message": memory_forget_message, "memory_write_skip": True}
+                        "memory_forget_message": memory_forget_message, "memory_write_skip": True,
+                        "token_used": token_used, "token_limit_reached": token_limit_reached}
             if route_label == "procedural_write":
                 parsed_rules = explicit_user_rules([current_user_text])
                 memory_write_skip = True
@@ -1052,6 +1103,8 @@ class CoreGraphRuntime:
                 "route_label": route_label,
                 "procedural_write_message": procedural_write_message,
                 "memory_write_skip": memory_write_skip,
+                "token_used": token_used,
+                "token_limit_reached": token_limit_reached,
             }
 
         async def agent(state: ARYAState) -> dict[str, Any]:
@@ -1064,7 +1117,8 @@ class CoreGraphRuntime:
                 if name in self.tools
             ]
             always_tools.extend(self.memory_tools.values())
-            model = self.main_model.bind_tools([self.load_skill_tool, *always_tools, *selected_tools])
+            bound_tools = [self.load_skill_tool, *always_tools, *selected_tools]
+            model = self.main_model.bind_tools(bound_tools)
             skill_context = self.skills.context(state.get("active_skills", []))
             last_action = state.get("last_action")
             account_context = (
@@ -1084,6 +1138,20 @@ class CoreGraphRuntime:
             if skill_context:
                 system_text += "\n\nActive skill instructions:\n" + skill_context
             messages = [SystemMessage(content=system_text), *state["messages"]]
+            turn_budget = max(1, int(self.limits.get("turn_token_budget", 12000)))
+            used_tokens = int(state.get("token_used", 0))
+            prompt_tokens = _count_prompt_tokens(messages, bound_tools)
+            remaining = turn_budget - used_tokens - prompt_tokens
+            if state.get("token_limit_reached") or remaining < 1:
+                return {
+                    "messages": [AIMessage(content="")],
+                    "token_used": turn_budget,
+                    "token_limit_reached": True,
+                    "system_prompt": system_text,
+                }
+            output_limit = min(int(self.limits.get("token_budget", turn_budget)), remaining)
+            if hasattr(model, "bind"):
+                model = model.bind(max_completion_tokens=output_limit)
             chunks: list[AIMessageChunk] = []
             aggregate: AIMessageChunk | None = None
             async for chunk in model.astream(messages):
@@ -1101,6 +1169,9 @@ class CoreGraphRuntime:
                 invalid_tool_calls=aggregate.invalid_tool_calls,
                 usage_metadata=aggregate.usage_metadata,
             )
+            output_tokens = _count_output_tokens(response.content, response.tool_calls)
+            token_used = used_tokens + prompt_tokens + output_tokens
+            reached_generation_cap = response.response_metadata.get("finish_reason") == "length"
             chosen_tools = list(state.get("chosen_tools", []))
             selected_tools = [call["name"] for call in response.tool_calls]
             if selected_tools:
@@ -1111,6 +1182,8 @@ class CoreGraphRuntime:
                 "messages": [response],
                 "chosen_tools": list(dict.fromkeys(chosen_tools)),
                 "system_prompt": system_text,
+                "token_used": token_used,
+                "token_limit_reached": token_used > turn_budget or reached_generation_cap,
             }
 
         async def tools(state: ARYAState) -> dict[str, Any]:
@@ -1386,7 +1459,10 @@ class CoreGraphRuntime:
             }
 
         async def cap_reached(state: ARYAState) -> dict[str, Any]:
-            message = "I reached the tool-call limit for this turn before I could finish."
+            if state.get("token_limit_reached"):
+                message = "I reached this turn's token limit before I could finish. I won't claim unfinished actions happened."
+            else:
+                message = "I reached the tool-call limit for this turn before I could finish. I won't claim unfinished actions happened."
             get_stream_writer()({"kind": "token", "text": message})
             return {"messages": [AIMessage(content=message)]}
 
@@ -1415,21 +1491,42 @@ class CoreGraphRuntime:
                 *state["messages"],
             ]
             regenerated = []
-            async for chunk in self.main_model.astream(prompt):
-                if getattr(chunk, "tool_call_chunks", None):
-                    continue
-                text = _text_value(chunk.content)
-                if text:
-                    regenerated.append(text)
+            turn_budget = max(1, int(self.limits.get("turn_token_budget", 12000)))
+            used_tokens = int(state.get("token_used", 0))
+            prompt_tokens = _count_prompt_tokens(prompt)
+            available = turn_budget - used_tokens - prompt_tokens
+            token_limit_reached = available < 1
+            if not token_limit_reached:
+                verifier_model = self.main_model
+                if hasattr(verifier_model, "bind"):
+                    verifier_model = verifier_model.bind(
+                        max_completion_tokens=min(int(self.limits.get("token_budget", turn_budget)), available),
+                    )
+                async for chunk in verifier_model.astream(prompt):
+                    if getattr(chunk, "tool_call_chunks", None):
+                        continue
+                    text = _text_value(chunk.content)
+                    if text:
+                        regenerated.append(text)
             safe_reply = "".join(regenerated).strip()
             if not safe_reply or _unsupported_claims(safe_reply, state):
                 safe_reply = "I couldn't verify that action or memory claim, so I won't claim it happened."
+            regenerated_tokens = _count_output_tokens(safe_reply)
+            if not token_limit_reached and regenerated_tokens > available:
+                token_limit_reached = True
+                safe_reply = "I reached this turn's token limit before I could verify the reply. I won't claim unfinished actions happened."
+            token_used = min(turn_budget, used_tokens + prompt_tokens + regenerated_tokens)
             writer({"kind": "token", "text": safe_reply})
             corrected = AIMessage(
                 content=safe_reply,
                 id=reply_message.id or f"verified-{uuid4()}",
             )
-            return {"messages": [corrected], "verification_passed": False}
+            return {
+                "messages": [corrected],
+                "verification_passed": False,
+                "token_used": token_used,
+                "token_limit_reached": token_limit_reached,
+            }
 
         async def respond(state: ARYAState) -> dict[str, Any]:
             logger.info(
@@ -1470,7 +1567,11 @@ class CoreGraphRuntime:
                 if state.get("tool_rounds", 0) >= int(self.limits.get("max_tool_rounds", 8)):
                     return "cap_reached"
                 return "tools"
-            return "procedural_write" if state.get("procedural_write_message") else "verify"
+            if state.get("procedural_write_message"):
+                return "procedural_write"
+            if state.get("token_limit_reached"):
+                return "cap_reached"
+            return "verify"
 
         builder.add_node("ingest", ingest)
         builder.add_node("route", route)
@@ -1548,6 +1649,8 @@ class CoreGraphRuntime:
             "now_ist": "",
             "memory_context": "",
             "active_skills": [],
+            "token_used": 0,
+            "token_limit_reached": False,
             "tainted": False,
             "pending_approval": None,
             "refusal_message": None,

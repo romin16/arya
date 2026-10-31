@@ -1,6 +1,6 @@
 # Phase 6 — Policy, approvals, verifier, and taint
 
-Status: **B0–B4 verified; B5–B7 not implemented**.
+Status: **B0–B5 verified; B6–B7 not implemented**.
 
 ## B0 — LangGraph interrupt support
 
@@ -30,4 +30,10 @@ Gmail, Calendar, Contacts, web search, browser results, and WhatsApp OCR/read/im
 
 The PostgreSQL test feeds a malicious instruction through a mocked web result. The graph tags it, taints the state, and pauses the otherwise-auto contact create call before the mocked contact tool executes.
 
-B5 caps and B6–B7 launcher and end-to-end tests remain unimplemented.
+## B5 — turn budgets
+
+`limits.turn_token_budget` now caps estimated input and output tokens across the router, agent turns, and any verifier regeneration. It uses the installed `tiktoken` encoding, passes the remaining output allowance to OpenAI, and stops before another model call when the prompt consumes the remaining budget. The existing `max_tool_rounds` stops before executing an extra tool batch. Both limits return honest messages that do not claim unfinished actions succeeded.
+
+The PostgreSQL suite checks that an exhausted token cap prevents router/agent calls and that a one-round tool cap executes only its allowed mocked action, then reports that it could not finish. There are no network/provider or GUI calls.
+
+B6 launcher fixes and B7 full scenario coverage remain unimplemented.
