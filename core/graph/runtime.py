@@ -257,6 +257,31 @@ def _tokenise_result(value: Any, vault: PIIVault) -> Any:
     return value
 
 
+def _untrusted_source(tool_name: str) -> str | None:
+    lowered = tool_name.casefold()
+    if lowered.startswith(("gmail_", "calendar_", "contacts_")):
+        return "google_workspace"
+    if lowered == "web_search":
+        return "web_search"
+    if lowered == "browser_task":
+        return "browser"
+    if "whatsapp" in lowered and any(marker in lowered for marker in ("ocr", "read", "image", "extract")):
+        return "whatsapp_ocr"
+    return None
+
+
+def _wrap_untrusted(value: Any, source: str) -> Any:
+    if isinstance(value, str):
+        return f'<untrusted source="{source}">{value}</untrusted>'
+    if isinstance(value, list):
+        return [_wrap_untrusted(item, source) for item in value]
+    if isinstance(value, tuple):
+        return [_wrap_untrusted(item, source) for item in value]
+    if isinstance(value, dict):
+        return {key: _wrap_untrusted(item, source) for key, item in value.items()}
+    return value
+
+
 def _detokenise_display(value: Any, vault: PIIVault) -> Any:
     if isinstance(value, str):
         return vault.detokenise(value)
@@ -1102,6 +1127,7 @@ class CoreGraphRuntime:
             results: list[ToolMessage] = []
             refusal_message = None
             memory_forget_message = None
+            tainted = bool(state.get("tainted"))
             pending_forget = state.get("pending_forget")
             timeout = float(self.limits.get("tool_timeout_seconds", 30))
             tool_calls = [dict(call) for call in assistant.tool_calls]
@@ -1273,6 +1299,10 @@ class CoreGraphRuntime:
                             if name not in {"web_search", "get_weather", "calculator"}:
                                 raise ValueError("tool is unavailable for the active skills")
                         result = await asyncio.wait_for(tool.ainvoke(args), timeout=timeout)
+                        source = _untrusted_source(name)
+                        if source is not None:
+                            result = _wrap_untrusted(result, source)
+                            tainted = True
                         if (
                             isinstance(result, dict)
                             and result.get("approval_required")
@@ -1327,6 +1357,7 @@ class CoreGraphRuntime:
                 "active_skills": active_skills,
                 "refusal_message": refusal_message,
                 "memory_forget_message": memory_forget_message,
+                "tainted": tainted,
                 "approval_resuming": False,
                 **({"pending_forget": pending_forget} if "pending_forget" in locals() else {}),
             }

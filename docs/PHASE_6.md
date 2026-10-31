@@ -1,6 +1,6 @@
 # Phase 6 — Policy, approvals, verifier, and taint
 
-Status: **B0–B3 verified; B4–B7 not implemented**.
+Status: **B0–B4 verified; B5–B7 not implemented**.
 
 ## B0 — LangGraph interrupt support
 
@@ -24,4 +24,10 @@ PostgreSQL integration coverage verifies approved and rejected email actions, vi
 
 Final assistant text is held until a deterministic verifier checks action verbs against successful tool results and checks save/remember/forget claims against memory operations and retrieved context. Unsupported claims are regenerated once with tool calling disabled; if the corrected text still makes an unsupported claim, a fixed honest fallback is sent. The graph test mocks a failed WhatsApp call and an unsupported memory claim, and confirms both are regenerated once without another tool call.
 
-B4 injection taint, B5 caps, and B6–B7 launcher and end-to-end tests remain unimplemented.
+## B4 — untrusted-result taint
+
+Gmail, Calendar, Contacts, web search, browser results, and WhatsApp OCR/read/image results are wrapped in source-tagged `<untrusted>` elements after PII tokenization. Reading one marks the current turn tainted. With the default-on policy flag, auto-mode side-effect tools escalate to approval for the rest of that turn; read-only tools stay automatic. User messages remain trusted.
+
+The PostgreSQL test feeds a malicious instruction through a mocked web result. The graph tags it, taints the state, and pauses the otherwise-auto contact create call before the mocked contact tool executes.
+
+B5 caps and B6–B7 launcher and end-to-end tests remain unimplemented.
