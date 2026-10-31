@@ -24,6 +24,8 @@ def _status(message: ToolMessage | None) -> str:
         result = json.loads(message.content) if isinstance(message.content, str) else message.content
     except (TypeError, json.JSONDecodeError):
         result = None
+    if isinstance(result, dict) and result.get("outcome") in {"succeeded", "no_op", "failed"}:
+        return result["outcome"]
     if isinstance(result, dict) and result.get("success") is False:
         return "failed"
     return "succeeded"

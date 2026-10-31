@@ -79,6 +79,12 @@ CREATE TABLE IF NOT EXISTS memory_tombstones (
  created_at timestamptz NOT NULL DEFAULT now(),suppressed_until timestamptz NOT NULL);
 CREATE UNIQUE INDEX IF NOT EXISTS memory_tombstones_identity ON memory_tombstones(user_id,store,fingerprint);
 CREATE INDEX IF NOT EXISTS memory_tombstones_expiry ON memory_tombstones(user_id,suppressed_until);
+CREATE TABLE IF NOT EXISTS pending_operations (
+ id bigserial PRIMARY KEY,user_id text NOT NULL,thread_id text NOT NULL,
+ operation_type text NOT NULL,payload jsonb NOT NULL,
+ created_at timestamptz NOT NULL DEFAULT now(),expires_at timestamptz NOT NULL,
+ UNIQUE(user_id,thread_id));
+CREATE INDEX IF NOT EXISTS pending_operations_expiry ON pending_operations(expires_at);
 CREATE TABLE IF NOT EXISTS action_log (
  id bigserial PRIMARY KEY,user_id text NOT NULL,thread_id text,ts timestamptz DEFAULT now(),tool text,
  args jsonb,status text,result_summary text,approved_by text,duration_ms int);

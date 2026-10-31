@@ -252,6 +252,38 @@ class MemoryRepositories:
             )
             return await cur.fetchone() is not None
 
+    async def set_pending_operation(
+        self, user_id: str, thread_id: str, operation_type: str, payload: dict[str, Any], *, ttl_seconds: int,
+    ) -> dict[str, Any]:
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                """INSERT INTO pending_operations(user_id,thread_id,operation_type,payload,expires_at)
+                   VALUES(%s,%s,%s,%s,now()+(%s*interval '1 second'))
+                   ON CONFLICT(user_id,thread_id) DO UPDATE SET
+                     operation_type=EXCLUDED.operation_type,payload=EXCLUDED.payload,
+                     created_at=now(),expires_at=EXCLUDED.expires_at
+                   RETURNING id,user_id,thread_id,operation_type,payload,created_at,expires_at""",
+                (user_id, thread_id, operation_type, Jsonb(payload), ttl_seconds),
+            )
+            return await cur.fetchone()
+
+    async def get_pending_operation(self, user_id: str, thread_id: str) -> dict[str, Any] | None:
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                """SELECT id,user_id,thread_id,operation_type,payload,created_at,expires_at
+                   FROM pending_operations WHERE user_id=%s AND thread_id=%s""",
+                (user_id, thread_id),
+            )
+            return await cur.fetchone()
+
+    async def clear_pending_operation(self, user_id: str, thread_id: str, operation_id: int) -> bool:
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                "DELETE FROM pending_operations WHERE user_id=%s AND thread_id=%s AND id=%s",
+                (user_id, thread_id, operation_id),
+            )
+            return cur.rowcount == 1
+
     async def delete_candidates(self, user_id: str, candidates: list[dict[str, Any]], *, suppression_days: int = 90) -> dict[str, Any]:
         allowed = {"entities", "procedures", "patterns", "episodes"}
         deleted_items: list[dict[str, Any]] = []
@@ -326,7 +358,9 @@ class MemoryRepositories:
                 except Exception as exc:
                     logger.exception("memory_forget_delete_failed store=%s id=%s", table, item.get("id"))
                     failed_items.append({**item, "reason": f"delete failed ({type(exc).__name__})"})
+        outcome = "failed" if failed_items else "succeeded" if deleted_items else "no_op"
         return {
+            "outcome": outcome,
             "found_count": len(candidates),
             "found_items": candidates,
             "deleted_count": len(deleted_items),

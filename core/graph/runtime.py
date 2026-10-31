@@ -8,7 +8,7 @@ import logging
 import os
 import re
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 from zoneinfo import ZoneInfo
@@ -144,6 +144,9 @@ class ARYAState(MessagesState, total=False):
     pending_approval: Any
     refusal_message: str | None
     pending_forget: list[dict[str, Any]] | None
+    pending_operation: dict[str, Any] | None
+    pending_operation_handled: bool
+    memory_write_skip: bool
     memory_forget_message: str | None
     tool_rounds: int
 
@@ -280,7 +283,17 @@ def _forget_delete_reply(result: dict[str, Any]) -> str:
     found = int(result.get("found_count", len(result.get("found_items", []))))
     deleted = int(result.get("deleted_count", 0))
     failed = int(result.get("failed_count", 0))
-    parts = [f"Found {found} matching memory item(s). Deleted {deleted}; {failed} failed."]
+    names = {"procedures": "rule", "entities": "fact", "episodes": "episode", "patterns": "pattern"}
+    counts = result.get("counts_by_store", {})
+    nonzero = [(names.get(store, store), count) for store, count in counts.items() if count]
+    if len(nonzero) == 1:
+        noun, count = nonzero[0]
+        deletion = f"Deleted {count} {noun}{'' if count == 1 else 's'}"
+    elif nonzero:
+        deletion = f"Deleted {deleted} items across {len(nonzero)} memory types"
+    else:
+        deletion = f"Deleted {deleted} items"
+    parts = [f"Found {found} matching item(s). {deletion}; {failed} failed."]
     deleted_items = result.get("deleted_items", [])
     failed_items = result.get("failed_items", [])
     if deleted_items:
@@ -310,6 +323,7 @@ class CoreGraphRuntime:
         self.router_model: Any = None
         self.graph = None
         self.limits: dict[str, Any] = {}
+        self.pending_operation_ttl_seconds = 300
         self.persona = ""
         self.load_skill_tool: StructuredTool | None = None
         self.memory: MemoryService | None = None
@@ -335,6 +349,9 @@ class CoreGraphRuntime:
 
         model_settings = yaml.safe_load((ROOT / "config" / "models.yaml").read_text(encoding="utf-8"))
         self.limits = model_settings["limits"]
+        self.pending_operation_ttl_seconds = int(
+            model_settings.get("memory", {}).get("pending_operation_ttl_seconds", 300)
+        )
         self.skills = SkillsRuntime(
             ROOT / "skills",
             max_active=int(self.limits.get("max_active_skills", 3)),
@@ -604,6 +621,84 @@ class CoreGraphRuntime:
             raise RuntimeError("Core runtime is not initialized")
         builder = StateGraph(ARYAState)
 
+        async def pending_operation_gate(state: ARYAState) -> dict[str, Any]:
+            operation = state.get("pending_operation")
+            if not operation:
+                return {"pending_operation_handled": False}
+            assert self.memory is not None and self.pool is not None
+            operation_id = int(operation["id"])
+            now = datetime.now(timezone.utc)
+            expires_at = operation["expires_at"]
+            expired = expires_at <= now
+            latest = next(
+                (message for message in reversed(state["messages"]) if isinstance(message, HumanMessage)),
+                None,
+            )
+            text = _text_value(latest.content if latest else "").strip()
+            confirmation = bool(re.fullmatch(
+                r"(?:confirm|yes|go ahead|clear them|do it|delete|proceed)\s*[.!]?", text, re.I,
+            ))
+            cancellation = bool(re.fullmatch(
+                r"(?:cancel|never mind|nevermind|no|keep them|don't delete|do not delete)\s*[.!]?", text, re.I,
+            ))
+            reply: str
+            outcome: str | None = None
+            result: dict[str, Any] | None = None
+            clear = False
+            if operation["operation_type"] != "memory_forget":
+                if expired:
+                    await self.memory.repositories.clear_pending_operation(
+                        state["user_id"], state["thread_id"], operation_id,
+                    )
+                    reply = "That pending operation expired. No action was performed."
+                    clear = True
+                else:
+                    reply = "A pending operation needs to be resolved before I can handle another request."
+            elif expired:
+                reply = "That confirmation expired. Nothing was deleted. Ask me to preview the items again."
+                outcome = "no_op"
+                result = {"outcome": outcome, "found_count": len(operation["payload"].get("items", [])),
+                          "deleted_count": 0, "failed_count": 0, "message": reply}
+                clear = True
+            elif confirmation:
+                candidates = operation["payload"].get("items", [])
+                result = await self.memory.delete_candidates(state["user_id"], candidates)
+                outcome = result["outcome"]
+                reply = _forget_delete_reply(result)
+                clear = True
+            elif cancellation:
+                candidates = operation["payload"].get("items", [])
+                reply = f"Cancelled. Nothing was deleted. {len(candidates)} item(s) remain."
+                outcome = "no_op"
+                result = {"outcome": outcome, "found_count": len(candidates), "deleted_count": 0,
+                          "failed_count": 0, "message": reply}
+                clear = True
+            else:
+                reply = "I still have the reviewed list. Reply ‘confirm’ to delete those exact items, or ‘cancel’ to keep them."
+
+            if clear:
+                await self.memory.repositories.clear_pending_operation(
+                    state["user_id"], state["thread_id"], operation_id,
+                )
+            if clear and operation["operation_type"] == "memory_forget":
+                await persist_action_entries(
+                    self.pool,
+                    user_id=state["user_id"],
+                    thread_id=state["thread_id"],
+                    entries=[{
+                        "tool": "memory_forget",
+                        "args": {"operation_id": operation_id, "confirm": confirmation and not expired},
+                        "status": outcome,
+                        "result_summary": json.dumps(result, ensure_ascii=False, default=str),
+                    }],
+                )
+            return {
+                "pending_operation_handled": True,
+                "pending_operation": None if clear else operation,
+                "memory_forget_message": reply,
+                "memory_write_skip": True,
+            }
+
         async def ingest(state: ARYAState) -> dict[str, Any]:
             writer = get_stream_writer()
             messages = list(state["messages"])
@@ -763,17 +858,19 @@ class CoreGraphRuntime:
                         if name == "memory_search":
                             result = await self.memory.search(state["user_id"], str(safe_args.get("query", "")), date=safe_args.get("date"))
                         else:
-                            pending = state.get("pending_forget") or []
-                            user_text = _text_value(next((message.content for message in reversed(messages) if isinstance(message, HumanMessage)), ""))
-                            explicit = bool(re.fullmatch(r"\s*(yes|confirm|delete|forget|proceed|do it)\s*[.!]?\s*", user_text, re.I))
-                            if bool(safe_args.get("confirm")) and pending and explicit:
-                                result = await self.memory.delete_candidates(state["user_id"], pending)
-                                pending_forget = None
-                                memory_forget_message = _forget_delete_reply(result)
-                            else:
-                                result = await self.memory.forget(state["user_id"], str(safe_args.get("query", "")), confirm=False)
-                                pending_forget = result.get("will_delete", [])
-                                memory_forget_message = _forget_preview_reply(result)
+                            result = await self.memory.forget(
+                                state["user_id"], str(safe_args.get("query", "")), confirm=False,
+                            )
+                            pending_forget = result.get("will_delete", [])
+                            if pending_forget:
+                                await self.memory.repositories.set_pending_operation(
+                                    state["user_id"], state["thread_id"], "memory_forget",
+                                    {"items": pending_forget},
+                                    ttl_seconds=self.pending_operation_ttl_seconds,
+                                )
+                            memory_forget_message = _forget_preview_reply(result)
+                            result["message"] = memory_forget_message
+                            result["outcome"] = "no_op"
                     elif name == "load_skill":
                         body, active_skills = self.skills.load(args["name"], active_skills)
                         result: Any = body
@@ -876,7 +973,8 @@ class CoreGraphRuntime:
                 "message": "Saving relevant facts and conversation context in the background",
             })
             get_stream_writer()({"kind": "complete"})
-            self._queue_memory_write(state)
+            if not state.get("memory_write_skip"):
+                self._queue_memory_write(state)
             return {}
 
         async def refusal_response(state: ARYAState) -> dict[str, Any]:
@@ -906,7 +1004,13 @@ class CoreGraphRuntime:
         builder.add_node("respond", respond)
         builder.add_node("refusal_response", refusal_response)
         builder.add_node("memory_forget_response", memory_forget_response)
-        builder.add_edge(START, "ingest")
+        builder.add_edge(START, "pending_operation_gate")
+        builder.add_conditional_edges(
+            "pending_operation_gate",
+            lambda state: "handled" if state.get("pending_operation_handled") else "normal",
+            {"handled": "memory_forget_response", "normal": "ingest"},
+        )
+        builder.add_node("pending_operation_gate", pending_operation_gate)
         builder.add_edge("ingest", "route")
         builder.add_edge("route", "agent")
         builder.add_conditional_edges(
@@ -930,10 +1034,17 @@ class CoreGraphRuntime:
         if self.graph is None or self.vault is None:
             raise RuntimeError("Core graph is not initialized")
         stream_detokenizer = StreamingDetokenizer(self.vault)
+        user_id = self.vault.tokenise(request.user_id or getattr(self, "user_id", "arya-local"))
+        pending_operation = None
+        repositories = getattr(self.memory, "repositories", None)
+        if repositories is not None and hasattr(repositories, "get_pending_operation"):
+            # Resolve thread-bound operations before ingest, routing, or model calls.
+            pending_operation = await repositories.get_pending_operation(user_id, session_id)
         input_state: ARYAState = {
             "messages": [HumanMessage(content=request.message, id=f"user-{uuid4()}")],
-            "user_id": self.vault.tokenise(request.user_id or getattr(self, "user_id", "arya-local")),
+            "user_id": user_id,
             "thread_id": session_id,
+            "pending_operation": pending_operation,
             "now_ist": "",
             "memory_context": "",
             "active_skills": [],

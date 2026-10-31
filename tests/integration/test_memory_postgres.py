@@ -157,6 +157,7 @@ async def _runtime(database_url: str, *, writer: ScriptedWriter, session: str):
     runtime.main_model = ScriptedAgent()
     runtime.skills = SkillsRuntime(ROOT / "skills")
     runtime.limits = {"max_tool_rounds": 8, "tool_timeout_seconds": 2, "token_budget": 100}
+    runtime.pending_operation_ttl_seconds = 300
     runtime.persona = "Test persona"
     runtime.tools = {"whatsapp_send": FakeNetworkTool()}
     runtime.device_tools = runtime.tools
@@ -224,11 +225,18 @@ async def test_graph_forget_confirm_tombstone_dedup_and_writer_suppression():
         assert "Found 1 matching memory item" in preview
         assert "Nothing was deleted" in preview
         assert len(await runtime.memory.repositories.active_procedures(user_token)) == 1
+        pending = await runtime.memory.repositories.get_pending_operation(user_token, session)
+        assert pending and pending["operation_type"] == "memory_forget"
+        assert pending["payload"]["items"] == [{
+            "store": "procedures", "id": active[0]["id"], "preview": "Never message Aditya on WhatsApp again.",
+        }]
 
         confirmation, _ = await _turn(runtime, "confirm", user_id)
-        assert confirmation == "Found 1 matching memory item(s). Deleted 1; 0 failed.\nDeleted:\n- procedures: Never message Aditya on WhatsApp again."
+        assert "Deleted 1 rule" in confirmation
+        assert "0 failed" in confirmation
         assert len(await runtime.memory.repositories.active_procedures(user_token)) == 0
         assert writer.calls == 1  # Both forget turns skipped memory extraction.
+        assert await runtime.memory.repositories.get_pending_operation(user_token, session) is None
 
         await runtime.memory.write_records(
             user_token, session, {}, user_texts=["never   message Aditya on WhatsApp again"],
@@ -240,6 +248,52 @@ async def test_graph_forget_confirm_tombstone_dedup_and_writer_suppression():
                 (user_token,),
             )).fetchone()
         assert tombstones["count"] == 1
+        async with runtime.pool.connection() as conn:
+            logs = await (await conn.execute(
+                "SELECT status FROM action_log WHERE user_id=%s AND thread_id=%s AND tool='memory_forget' ORDER BY id",
+                (user_token, session),
+            )).fetchall()
+        assert [row["status"] for row in logs] == ["no_op", "succeeded"]
+    finally:
+        await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_pending_forget_wrong_text_reasks_and_expired_confirmation_does_not_delete():
+    database_url = os.environ["ARYA_TEST_DATABASE_URL"]
+    session = f"memory-forget-expiry-{uuid4().hex}"
+    user_id = f"memory-user-{uuid4().hex}"
+    writer = ScriptedWriter()
+    runtime = await _runtime(database_url, writer=writer, session=session)
+    try:
+        user_token = runtime.vault.tokenise(user_id)
+        await _turn(runtime, "Never message Aditya on WhatsApp again.", user_id)
+        await runtime.memory.write_records(
+            user_token, session, {}, user_texts=["Never message Aditya on WhatsApp again."],
+        )
+        await _turn(runtime, "Forget the rule about Aditya", user_id)
+
+        wrong_text, _ = await _turn(runtime, "That sounds fine", user_id)
+        assert "Reply ‘confirm’" in wrong_text
+        assert len(await runtime.memory.repositories.active_procedures(user_token)) == 1
+        assert await runtime.memory.repositories.get_pending_operation(user_token, session) is not None
+
+        async with runtime.pool.connection() as conn:
+            await conn.execute(
+                "UPDATE pending_operations SET expires_at=now()-interval '1 second' WHERE user_id=%s AND thread_id=%s",
+                (user_token, session),
+            )
+        expired_reply, _ = await _turn(runtime, "confirm", user_id)
+        assert "expired" in expired_reply.casefold()
+        assert "Nothing was deleted" in expired_reply
+        assert len(await runtime.memory.repositories.active_procedures(user_token)) == 1
+        assert await runtime.memory.repositories.get_pending_operation(user_token, session) is None
+        async with runtime.pool.connection() as conn:
+            statuses = await (await conn.execute(
+                "SELECT status FROM action_log WHERE user_id=%s AND thread_id=%s AND tool='memory_forget' ORDER BY id",
+                (user_token, session),
+            )).fetchall()
+        assert [row["status"] for row in statuses] == ["no_op", "no_op"]
     finally:
         await runtime.close()
 

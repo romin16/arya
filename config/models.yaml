@@ -10,3 +10,4 @@ limits:
 memory:
   tombstone_suppression_days: 90
   soft_procedure_confidence: 0.3
+  pending_operation_ttl_seconds: 300
