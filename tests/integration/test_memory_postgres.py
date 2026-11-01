@@ -24,6 +24,7 @@ from psycopg_pool import AsyncConnectionPool
 
 from core.graph.runtime import (
     ApprovalClassification,
+    ApprovalEdit,
     CoreGraphRuntime,
     LoadSkillArgs,
     MemoryEntity,
@@ -39,6 +40,7 @@ from core.mcp_adapters.google_workspace import GOOGLE_REQUIRED_SOURCES
 from core.policy_gate import ToolPolicy
 from core.pii.vault import PIIVault
 from core.skills_runtime import SkillsRuntime
+from tests.unit.test_structured_outputs import _assert_openai_strict_schema
 
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
@@ -117,7 +119,7 @@ class ScriptedRouter:
     async def ainvoke(self, messages):
         text = next((message.content for message in reversed(messages) if isinstance(message, HumanMessage)), "")
         intent = self.intent if text.casefold().startswith("never") else "none"
-        return RouteDecision(memory_intent=intent)
+        return RouteDecision(likely_skills=[], memory_reads=[], memory_intent=intent)
 
 
 class ScriptedAgent:
@@ -166,27 +168,36 @@ class ScriptedWriter:
         if self.email:
             return MemoryWrite(
                 entities=[
-                    MemoryEntity(key="employment", value="TCS"),
-                    MemoryEntity(key="email_address", value=self.email),
+                    MemoryEntity(key="employment", value="TCS", confidence=1.0),
+                    MemoryEntity(key="email_address", value=self.email, confidence=1.0),
                 ],
                 episode=MemoryEpisode(
                     summary=f"User email is {self.email}",
                     body=f"Remember this email: {self.email}",
                     topics=["contact details"],
+                    tools_used=[],
                 ),
-                procedures=[{"rule_text": f"Never email {self.email}"}],
+                procedures=[{
+                    "rule_text": f"Never email {self.email}", "scope": "global", "tool_pattern": "gmail_send",
+                    "severity": "hard", "confidence": 1.0, "argument_constraints": [],
+                }],
+                patterns=[],
             )
         # Deliberately emulate the bad historical extraction: a rule and its
         # contact name are offered as entity facts. The service must reject them.
         return MemoryWrite(
             entities=[
-                MemoryEntity(key="Aditya_rule", value="Aditya"),
-                MemoryEntity(key="contact", value="Aditya"),
+                MemoryEntity(key="Aditya_rule", value="Aditya", confidence=1.0),
+                MemoryEntity(key="contact", value="Aditya", confidence=1.0),
             ],
             episode=MemoryEpisode(
                 summary="A standing WhatsApp contact rule was set.",
                 body="Never message Aditya on WhatsApp again.",
+                topics=[],
+                tools_used=[],
             ),
+            procedures=[],
+            patterns=[],
         )
 
 
@@ -603,7 +614,7 @@ async def test_graph_approval_restores_self_recipient_and_executes_only_after_co
 
     class Router:
         async def ainvoke(self, messages):
-            return RouteDecision(likely_skills=["email"], memory_intent="none")
+            return RouteDecision(likely_skills=["email"], memory_reads=[], memory_intent="none")
 
     class Agent:
         def __init__(self, address_token):
@@ -626,7 +637,7 @@ async def test_graph_approval_restores_self_recipient_and_executes_only_after_co
 
     class Classifier:
         async def ainvoke(self, messages):
-            return ApprovalClassification(decision="approve")
+            return ApprovalClassification(decision="approve", edits=[], unrelated_command=False)
 
     runtime = await _runtime(database_url, writer=ScriptedWriter(), session=session)
     vault = runtime.vault
@@ -668,7 +679,7 @@ async def _approval_harness(monkeypatch, database_url, session, user_id, recipie
 
     class Router:
         async def ainvoke(self, messages):
-            return RouteDecision(likely_skills=["email"], memory_intent="none")
+            return RouteDecision(likely_skills=["email"], memory_reads=[], memory_intent="none")
 
     class Agent:
         def __init__(self, address_token):
@@ -708,9 +719,16 @@ async def _approval_harness(monkeypatch, database_url, session, user_id, recipie
             self.calls = 0
 
         async def ainvoke(self, messages):
+            _assert_openai_strict_schema(ApprovalClassification)
             result = self.configured[self.calls]
             self.calls += 1
-            return result
+            if isinstance(result, BaseException):
+                raise result
+            # Match the parsed result shape returned by the real strict JSON-schema
+            # client and fail locally if the classifier stub drifts from it.
+            return ApprovalClassification.model_validate(
+                result.model_dump() if isinstance(result, ApprovalClassification) else result
+            )
 
     runtime = await _runtime(database_url, writer=ScriptedWriter(), session=session)
     vault = runtime.vault
@@ -750,7 +768,7 @@ async def test_approval_uses_real_skills_schemas_and_startup_registry(
 
     class Router:
         async def ainvoke(self, messages):
-            return RouteDecision(likely_skills=[skill], memory_intent="none")
+            return RouteDecision(likely_skills=[skill], memory_reads=[], memory_intent="none")
 
     class Agent:
         def __init__(self):
@@ -779,7 +797,7 @@ async def test_approval_uses_real_skills_schemas_and_startup_registry(
 
     class Classifier:
         async def ainvoke(self, messages):
-            return ApprovalClassification(decision="approve")
+            return ApprovalClassification(decision="approve", edits=[], unrelated_command=False)
 
     agent = Agent()
     runtime.router_model = Router()
@@ -826,7 +844,10 @@ async def test_approval_edits_change_executed_arguments(monkeypatch):
     new_email = f"new-{uuid4().hex[:8]}@arya.dev"
     runtime, calls, vault, _ = await _approval_harness(
         monkeypatch, database_url, session, user_id, old_email,
-        [ApprovalClassification(decision="edit", edited_args=[{"to": [new_email], "body": "Updated"}])],
+        [ApprovalClassification(decision="edit", edits=[
+            ApprovalEdit(call_index=0, field_name="to", new_value=[new_email]),
+            ApprovalEdit(call_index=0, field_name="body", new_value="Updated"),
+        ], unrelated_command=False)],
     )
     try:
         question, _ = await _turn(runtime, "Send an email to myself saying hi.", user_id)
@@ -848,7 +869,9 @@ async def test_approval_edit_with_unknown_argument_is_refused_safely(monkeypatch
     recipient = f"invalid-{uuid4().hex[:8]}@arya.dev"
     runtime, calls, _, _ = await _approval_harness(
         monkeypatch, database_url, session, user_id, recipient,
-        [ApprovalClassification(decision="edit", edited_args=[{"send_all_money": True}])],
+        [ApprovalClassification(decision="edit", edits=[
+            ApprovalEdit(call_index=0, field_name="send_all_money", new_value=True),
+        ], unrelated_command=False)],
     )
     try:
         await _turn(runtime, "Send an email to myself saying hi.", user_id)
@@ -867,18 +890,115 @@ async def test_unclear_reasks_rejection_cancels_and_never_calls_tool(monkeypatch
     recipient = f"reject-{uuid4().hex[:8]}@arya.dev"
     runtime, calls, vault, _ = await _approval_harness(
         monkeypatch, database_url, session, user_id, recipient,
-        [ApprovalClassification(decision="unclear"), ApprovalClassification(decision="reject")],
+        [
+            ApprovalClassification(decision="unclear", edits=[], unrelated_command=False),
+            ApprovalClassification(decision="reject", edits=[], unrelated_command=False),
+        ],
     )
     try:
         question, _ = await _turn(runtime, "Send an email to myself saying hi.", user_id)
         reask, _ = await _turn(runtime, "maybe", user_id)
         assert question in reask
-        assert "couldn't tell" in reask
+        assert "I couldn't understand your reply, please say yes or no." in reask
         assert await runtime.memory.repositories.get_pending_operation(vault.tokenise(user_id), session) is not None
         rejected, _ = await _turn(runtime, "no", user_id)
         assert "Approval was rejected" in rejected
         assert calls == []
         assert await runtime.memory.repositories.get_pending_operation(vault.tokenise(user_id), session) is None
+    finally:
+        await runtime.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("scenario", "decisions", "reply", "extra_reply", "expected_calls"),
+    [
+        ("yes", [ApprovalClassification(decision="approve", edits=[], unrelated_command=False)],
+         "yes", None, 1),
+        ("no", [ApprovalClassification(decision="reject", edits=[], unrelated_command=False)],
+         "no", None, 0),
+        ("edit", [ApprovalClassification(decision="edit", edits=[
+            ApprovalEdit(call_index=0, field_name="body", new_value="Edited body"),
+        ], unrelated_command=False)], "Change the message to Edited body.", None, 1),
+        ("unclear", [
+            ApprovalClassification(decision="unclear", edits=[], unrelated_command=False),
+            ApprovalClassification(decision="reject", edits=[], unrelated_command=False),
+        ], "maybe", "no", 0),
+        ("unrelated", [ApprovalClassification(decision="reject", edits=[], unrelated_command=True)],
+         "What's the weather today?", None, 0),
+        ("expired", [], "yes", None, 0),
+    ],
+)
+async def test_approval_resume_scenarios_allow_followup_on_same_thread(
+    monkeypatch, scenario, decisions, reply, extra_reply, expected_calls,
+):
+    database_url = os.environ["ARYA_TEST_DATABASE_URL"]
+    session = f"phase6-resume-{scenario}-{uuid4().hex}"
+    user_id = f"memory-user-{uuid4().hex}"
+    recipient = f"resume-{uuid4().hex[:8]}@arya.dev"
+    runtime, calls, vault, _ = await _approval_harness(
+        monkeypatch, database_url, session, user_id, recipient, decisions,
+    )
+    try:
+        approval_question, _ = await _turn(runtime, "Send an email to myself saying hi.", user_id)
+        assert "Approve these actions?" in approval_question
+        if scenario == "expired":
+            async with runtime.pool.connection() as conn:
+                await conn.execute(
+                    "UPDATE pending_operations SET expires_at=now()-interval '1 second' "
+                    "WHERE user_id=%s AND thread_id=%s",
+                    (vault.tokenise(user_id), session),
+                )
+        resolved, _ = await _turn(runtime, reply, user_id)
+        if scenario == "unclear":
+            assert "I couldn't understand your reply, please say yes or no." in resolved
+            resolved, _ = await _turn(runtime, extra_reply, user_id)
+        if scenario == "yes":
+            assert resolved == "The email was sent."
+        elif scenario == "edit":
+            assert resolved == "The email was sent."
+            assert calls[0][1]["body"] == "Edited body"
+        elif scenario == "no":
+            assert "Approval was rejected" in resolved
+        elif scenario == "expired":
+            assert "expired" in resolved.casefold()
+        elif scenario == "unrelated":
+            assert resolved == "Handled unrelated request."
+        elif scenario == "unclear":
+            assert "Approval was rejected" in resolved
+        assert len(calls) == expected_calls
+
+        next_turn, _ = await _turn(runtime, "Tell me a short joke.", user_id)
+        assert next_turn == "Handled unrelated request."
+        assert len(calls) == expected_calls
+        assert await runtime.memory.repositories.get_pending_operation(vault.tokenise(user_id), session) is None
+    finally:
+        await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_classifier_failure_preserves_approval_and_next_reply_and_turn_work(monkeypatch):
+    database_url = os.environ["ARYA_TEST_DATABASE_URL"]
+    session = f"phase6-classifier-retry-{uuid4().hex}"
+    user_id = f"memory-user-{uuid4().hex}"
+    recipient = f"retry-{uuid4().hex[:8]}@arya.dev"
+    runtime, calls, vault, _ = await _approval_harness(
+        monkeypatch, database_url, session, user_id, recipient,
+        [RuntimeError("simulated classifier transport/schema failure"),
+         ApprovalClassification(decision="approve", edits=[], unrelated_command=False)],
+    )
+    try:
+        question, _ = await _turn(runtime, "Send an email to myself saying hi.", user_id)
+        assert "Approve these actions?" in question and calls == []
+        retry, _ = await _turn(runtime, "yes", user_id)
+        assert retry == "I couldn't understand your reply, please say yes or no."
+        pending = await runtime.memory.repositories.get_pending_operation(vault.tokenise(user_id), session)
+        assert pending is not None and calls == []
+        accepted, _ = await _turn(runtime, "yes", user_id)
+        assert accepted == "The email was sent."
+        assert len(calls) == 1
+        followup, _ = await _turn(runtime, "Tell me a short joke.", user_id)
+        assert followup == "Handled unrelated request."
     finally:
         await runtime.close()
 
@@ -944,7 +1064,7 @@ async def test_unrelated_message_rejects_pending_action_then_runs_as_new_turn(mo
     recipient = f"unrelated-{uuid4().hex[:8]}@arya.dev"
     runtime, calls, _, _ = await _approval_harness(
         monkeypatch, database_url, session, user_id, recipient,
-        [ApprovalClassification(decision="reject", unrelated_command=True)],
+        [ApprovalClassification(decision="reject", edits=[], unrelated_command=True)],
     )
     try:
         await _turn(runtime, "Send an email to myself saying hi.", user_id)
@@ -962,14 +1082,14 @@ async def test_verifier_regenerates_unsupported_action_and_memory_claims_once():
     user_id = f"memory-user-{uuid4().hex}"
     class EmptyWriter:
         async def ainvoke(self, messages):
-            return MemoryWrite()
+            return MemoryWrite(entities=[], procedures=[], episode=None, patterns=[])
 
     runtime = await _runtime(database_url, writer=EmptyWriter(), session=session)
     tool_calls = []
 
     class Router:
         async def ainvoke(self, messages):
-            return RouteDecision(likely_skills=["whatsapp"], memory_intent="none")
+            return RouteDecision(likely_skills=["whatsapp"], memory_reads=[], memory_intent="none")
 
     class ActionModel:
         def __init__(self):
@@ -1031,7 +1151,7 @@ async def test_untrusted_search_result_taints_turn_and_escalates_auto_create_to_
 
     class Router:
         async def ainvoke(self, messages):
-            return RouteDecision(likely_skills=["weather-search", "contacts"], memory_intent="none")
+            return RouteDecision(likely_skills=["weather-search", "contacts"], memory_reads=[], memory_intent="none")
 
     class Agent:
         def __init__(self):
@@ -1109,7 +1229,7 @@ async def test_taint_is_cleared_before_a_new_chat_turn_on_the_same_thread():
 
     class Router:
         async def ainvoke(self, messages):
-            return RouteDecision(likely_skills=["weather-search"], memory_intent="none")
+            return RouteDecision(likely_skills=["weather-search"], memory_reads=[], memory_intent="none")
 
     class Agent:
         def __init__(self):
@@ -1164,7 +1284,7 @@ async def test_device_tool_error_is_preserved_with_device_context_for_the_model(
 
     class Router:
         async def ainvoke(self, messages):
-            return RouteDecision(likely_skills=["spotify"], memory_intent="none")
+            return RouteDecision(likely_skills=["spotify"], memory_reads=[], memory_intent="none")
 
     class Agent:
         def __init__(self):
@@ -1220,7 +1340,7 @@ async def test_turn_token_cap_returns_honest_message_without_calling_model():
 
         async def ainvoke(self, messages):
             self.calls += 1
-            return RouteDecision(memory_intent="none")
+            return RouteDecision(likely_skills=[], memory_reads=[], memory_intent="none")
 
     class Agent:
         calls = 0
@@ -1235,7 +1355,7 @@ async def test_turn_token_cap_returns_honest_message_without_calling_model():
 
     class EmptyWriter:
         async def ainvoke(self, messages):
-            return MemoryWrite()
+            return MemoryWrite(entities=[], procedures=[], episode=None, patterns=[])
 
     runtime = await _runtime(database_url, writer=EmptyWriter(), session=session)
     router = Router()
@@ -1262,7 +1382,7 @@ async def test_tool_round_cap_stops_before_extra_tool_and_does_not_claim_it_succ
 
     class Router:
         async def ainvoke(self, messages):
-            return RouteDecision(likely_skills=["whatsapp"], memory_intent="none")
+            return RouteDecision(likely_skills=["whatsapp"], memory_reads=[], memory_intent="none")
 
     class Agent:
         def __init__(self):
@@ -1281,7 +1401,7 @@ async def test_tool_round_cap_stops_before_extra_tool_and_does_not_claim_it_succ
 
     class EmptyWriter:
         async def ainvoke(self, messages):
-            return MemoryWrite()
+            return MemoryWrite(entities=[], procedures=[], episode=None, patterns=[])
 
     async def send(contact: str, message: str):
         calls.append((contact, message))

@@ -7,10 +7,13 @@ import sys
 import uuid
 from contextlib import asynccontextmanager
 
+import httpx
+import psycopg
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+from openai import APIConnectionError
 
 from core.graph.runtime import CoreGraphRuntime
 from core.sse import encode_event
@@ -22,6 +25,23 @@ if sys.platform == "win32" and not isinstance(
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 logger = logging.getLogger("arya.core.http")
+
+
+def _is_connection_failure(error: BaseException) -> bool:
+    current: BaseException | None = error
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, (
+            httpx.ConnectError,
+            httpx.ConnectTimeout,
+            ConnectionError,
+            psycopg.OperationalError,
+            APIConnectionError,
+        )):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
 
 
 @asynccontextmanager
@@ -81,10 +101,14 @@ async def chat(req: ChatRequest):
                 raise RuntimeError("Core runtime has not started")
             async for event in runtime.stream_turn(req, session_id):
                 yield encode_event(event)
-        except Exception:
+        except Exception as exc:
             logger.exception("Core chat turn failed")
-            yield encode_event({"chunk": "I couldn't reach my assistant services just now."})
-            yield encode_event({"activity": {"event": "Error", "message": "Core service unavailable"}})
+            if _is_connection_failure(exc):
+                yield encode_event({"chunk": "I couldn't reach my assistant services just now."})
+                yield encode_event({"activity": {"event": "Error", "message": "Core service unavailable"}})
+            else:
+                yield encode_event({"chunk": "I hit an internal error while handling that request."})
+                yield encode_event({"activity": {"event": "Error", "message": "Request failed"}})
         yield encode_event({"done": True})
     return StreamingResponse(events(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 

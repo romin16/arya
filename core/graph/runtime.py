@@ -30,7 +30,7 @@ from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.types import Command, interrupt
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from core.graph.action_logger import latest_action_entries, persist_action_entries
 from core.memory.normalization import explicit_user_rules
@@ -85,66 +85,79 @@ FIXED_RULES = (
 logger = logging.getLogger("arya.core")
 
 
-class RouteDecision(BaseModel):
-    likely_skills: list[str] = Field(default_factory=list)
-    memory_reads: list["MemoryRead"] = Field(default_factory=list)
+class StrictStructuredOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class RouteDecision(StrictStructuredOutput):
+    likely_skills: list[str]
+    memory_reads: list["MemoryRead"]
     memory_intent: Literal[
         "entity_read", "episode_read", "knowledge_read", "entity_update_and_episode_write",
         "procedural_write", "memory_forget", "pattern_read", "none",
     ]
 
 
-class MemoryRead(BaseModel):
+class MemoryRead(StrictStructuredOutput):
     store: Literal["episode", "knowledge", "pattern"]
     query: str
-    date: str | None = None
+    date: str | None
 
 
-class MemoryEntity(BaseModel):
+class MemoryEntity(StrictStructuredOutput):
     key: str
     value: str
-    confidence: float = 1.0
+    confidence: float
 
 
-class MemoryArgumentConstraint(BaseModel):
+class MemoryArgumentConstraint(StrictStructuredOutput):
     argument: str
     operator: Literal["contains_casefold", "equals_casefold", "token_contains_casefold", "token_equals_casefold"]
     value: str
 
 
-class MemoryProcedure(BaseModel):
+class MemoryProcedure(StrictStructuredOutput):
     rule_text: str
-    scope: str = "global"
-    tool_pattern: str | None = None
-    severity: Literal["hard", "soft"] = "soft"
-    confidence: float = 0.3
-    argument_constraints: list[MemoryArgumentConstraint] = Field(default_factory=list)
+    scope: str
+    tool_pattern: str | None
+    severity: Literal["hard", "soft"]
+    confidence: float
+    argument_constraints: list[MemoryArgumentConstraint]
 
 
-class MemoryEpisode(BaseModel):
+class MemoryEpisode(StrictStructuredOutput):
     summary: str
     body: str
-    topics: list[str] = Field(default_factory=list)
-    tools_used: list[str] = Field(default_factory=list)
+    topics: list[str]
+    tools_used: list[str]
 
 
-class MemoryPattern(BaseModel):
+class MemoryPattern(StrictStructuredOutput):
     text: str
-    confidence: float = 0.5
-    evidence_count: int = 1
+    confidence: float
+    evidence_count: int
 
 
-class MemoryWrite(BaseModel):
-    entities: list[MemoryEntity] = Field(default_factory=list)
-    procedures: list[MemoryProcedure] = Field(default_factory=list)
-    episode: MemoryEpisode | None = None
-    patterns: list[MemoryPattern] = Field(default_factory=list)
+class MemoryWrite(StrictStructuredOutput):
+    entities: list[MemoryEntity]
+    procedures: list[MemoryProcedure]
+    episode: MemoryEpisode | None
+    patterns: list[MemoryPattern]
 
 
-class ApprovalClassification(BaseModel):
+class ApprovalEdit(StrictStructuredOutput):
+    call_index: int
+    field_name: str
+    new_value: str | int | float | bool | list[str] | None
+
+
+class ApprovalClassification(StrictStructuredOutput):
     decision: Literal["approve", "reject", "edit", "unclear"]
-    edited_args: list[dict[str, Any]] | None = None
-    unrelated_command: bool = False
+    edits: list[ApprovalEdit]
+    unrelated_command: bool
+
+
+STRUCTURED_OUTPUT_MODELS = (RouteDecision, ApprovalClassification, MemoryWrite)
 
 
 class MemorySearchArgs(BaseModel):
@@ -382,6 +395,81 @@ def _approval_question(calls: list[dict[str, Any]], vault: PIIVault) -> str:
             action = f"Run {name} with {json.dumps(args, ensure_ascii=False, default=str)}?"
         actions.append("- " + action)
     return "Approve these actions?\n" + "\n".join(actions) + "\nReply yes or no."
+
+
+def _classification_resume_value(
+    classification: ApprovalClassification,
+    call_count: int,
+) -> dict[str, Any]:
+    value: dict[str, Any] = {
+        "decision": classification.decision,
+        "unrelated_command": classification.unrelated_command,
+    }
+    if classification.decision != "edit":
+        return value
+    if not classification.edits:
+        raise ValueError("An edit decision must include at least one changed field")
+    edited_args: list[dict[str, Any]] = [{} for _ in range(call_count)]
+    for edit in classification.edits:
+        if edit.call_index < 0 or edit.call_index >= call_count:
+            raise ValueError("An edit refers to an unknown approval action")
+        if edit.field_name in edited_args[edit.call_index]:
+            raise ValueError("An edit repeats a field for the same approval action")
+        edited_args[edit.call_index][edit.field_name] = edit.new_value
+    value["edited_args"] = edited_args
+    return value
+
+
+def _schema_value_matches(value: Any, schema: dict[str, Any]) -> bool:
+    any_of = schema.get("anyOf")
+    if any_of:
+        return any(_schema_value_matches(value, option) for option in any_of)
+    expected = schema.get("type")
+    if value is None:
+        return expected in (None, "null")
+    if expected == "string":
+        valid = isinstance(value, str)
+    elif expected == "integer":
+        valid = isinstance(value, int) and not isinstance(value, bool)
+    elif expected == "number":
+        valid = isinstance(value, (int, float)) and not isinstance(value, bool)
+    elif expected == "boolean":
+        valid = isinstance(value, bool)
+    elif expected == "array":
+        valid = isinstance(value, list) and all(
+            _schema_value_matches(item, schema.get("items", {})) for item in value
+        )
+    elif expected == "object":
+        properties = schema.get("properties", {})
+        required = schema.get("required", [])
+        valid = (
+            isinstance(value, dict)
+            and not (set(value) - set(properties))
+            and set(required) <= set(value)
+            and all(_schema_value_matches(value[key], properties[key]) for key in value)
+        )
+    else:
+        valid = True
+    return valid and ("enum" not in schema or value in schema["enum"])
+
+
+def _validate_tool_arguments(tool: Any, arguments: dict[str, Any]) -> dict[str, Any]:
+    schema = getattr(tool, "args_schema", None)
+    if isinstance(schema, type) and issubclass(schema, BaseModel):
+        try:
+            return schema.model_validate(arguments).model_dump()
+        except Exception as exc:
+            raise ValueError("Edited arguments do not match the tool schema") from exc
+    if isinstance(schema, dict):
+        properties = schema.get("properties", {})
+        if not _schema_value_matches(arguments, schema):
+            raise ValueError("Edited arguments do not match the tool schema")
+        if not set(schema.get("required", [])) <= set(arguments):
+            raise ValueError("Edited arguments omit a required tool field")
+        if not isinstance(properties, dict):
+            raise ValueError("The tool schema is invalid")
+        return arguments
+    raise ValueError("The tool has no schema to validate edited arguments")
 
 
 def _verified_tool_names(messages: list[Any]) -> set[str]:
@@ -717,9 +805,15 @@ class CoreGraphRuntime:
             http_async_client=self.http_client,
             max_completion_tokens=int(self.limits["token_budget"]),
         )
-        self.router_model = auxiliary.with_structured_output(RouteDecision)
-        self.approval_model = auxiliary.with_structured_output(ApprovalClassification)
-        self.memory_writer_model = auxiliary.with_structured_output(MemoryWrite)
+        self.router_model = auxiliary.with_structured_output(
+            RouteDecision, method="json_schema", strict=True,
+        )
+        self.approval_model = auxiliary.with_structured_output(
+            ApprovalClassification, method="json_schema", strict=True,
+        )
+        self.memory_writer_model = auxiliary.with_structured_output(
+            MemoryWrite, method="json_schema", strict=True,
+        )
         self.memory_tools = {
             "memory_search": StructuredTool.from_function(
                 coroutine=self._memory_search_tool,
@@ -1042,7 +1136,7 @@ class CoreGraphRuntime:
             route_input_tokens = _count_prompt_tokens(route_messages)
             token_limit_reached = token_used + route_input_tokens >= turn_budget
             if token_limit_reached:
-                decision = RouteDecision(memory_intent="none")
+                decision = RouteDecision(likely_skills=[], memory_reads=[], memory_intent="none")
                 token_used = turn_budget
             else:
                 router_model = self.router_model
@@ -1301,13 +1395,15 @@ class CoreGraphRuntime:
                             if decision == "edit":
                                 changes = edits[index]
                                 tool = self.tools.get(call["name"]) or self.device_tools.get(call["name"])
-                                schema = getattr(tool, "args_schema", None)
-                                fields = getattr(schema, "model_fields", None)
-                                allowed = set(fields) if fields else set(safe_args)
-                                if not isinstance(changes, dict) or set(changes) - allowed:
+                                if not isinstance(changes, dict):
                                     approval_failed_message = "I couldn't apply those edits safely. Nothing was changed."
                                     break
                                 safe_args.update(_tokenise_result(changes, self.vault))
+                                try:
+                                    safe_args = _validate_tool_arguments(tool, safe_args)
+                                except ValueError:
+                                    approval_failed_message = "I couldn't apply those edits safely. Nothing was changed."
+                                    break
                             approved_args[call["id"]] = safe_args
                         if approval_failed_message:
                             approved_args.clear()
@@ -1727,10 +1823,10 @@ class CoreGraphRuntime:
             expired = pending_operation["expires_at"] <= datetime.now(timezone.utc)
             classification: ApprovalClassification
             if expired:
-                classification = ApprovalClassification(decision="reject")
+                classification = ApprovalClassification(decision="reject", edits=[], unrelated_command=False)
                 resume_value = {"decision": "expired"}
             elif self.approval_model is None:
-                classification = ApprovalClassification(decision="unclear")
+                classification = ApprovalClassification(decision="unclear", edits=[], unrelated_command=False)
                 resume_value = {"decision": "reject"}
             else:
                 latest_text = self.vault.tokenise(request.message)
@@ -1738,25 +1834,36 @@ class CoreGraphRuntime:
                     "approval": pending_operation["payload"],
                     "user_message": latest_text,
                 }
-                classified = await self.approval_model.ainvoke([
-                    SystemMessage(content=(
-                        "Classify the user's next message about this pending tool action as approve, reject, edit, or unclear. "
-                        "Return approve only for a clear yes. Return reject for no/cancel. Return edit when the user gives "
-                        "changed action arguments; edited_args must contain one partial argument object per listed approval "
-                        "call, in order, with only changed fields. Set unrelated_command=true when the message asks for a "
-                        "separate task instead of deciding about the pending action. Never execute tools."
-                    )),
-                    HumanMessage(content=json.dumps(context, ensure_ascii=False, default=str)),
-                ])
-                classification = (
-                    classified if isinstance(classified, ApprovalClassification)
-                    else ApprovalClassification.model_validate(classified)
-                )
-                resume_value = classification.model_dump()
+                try:
+                    classified = await self.approval_model.ainvoke([
+                        SystemMessage(content=(
+                            "Classify the user's next message about this pending tool action as approve, reject, edit, or unclear. "
+                            "Return approve only for a clear yes and reject for no/cancel. For edit, return one typed edits item "
+                            "per changed field, using its zero-based call_index, field_name, and new_value. Include empty edits "
+                            "when no fields changed. Set unrelated_command=true when the user asks for a separate task instead "
+                            "of deciding about the pending action. Never execute tools."
+                        )),
+                        HumanMessage(content=json.dumps(context, ensure_ascii=False, default=str)),
+                    ])
+                    classification = (
+                        classified if isinstance(classified, ApprovalClassification)
+                        else ApprovalClassification.model_validate(classified)
+                    )
+                    resume_value = _classification_resume_value(
+                        classification,
+                        len(pending_operation["payload"].get("calls", [])),
+                    )
+                except Exception:
+                    logger.warning(
+                        "approval_reply_classification_failed turn=%s pending_retained=true",
+                        hashlib.sha256(session_id.encode("utf-8", errors="replace")).hexdigest()[:10],
+                    )
+                    yield {"chunk": "I couldn't understand your reply, please say yes or no."}
+                    return
             if classification.decision == "unclear":
                 yield {"activity": {"event": "Approval", "message": "Approval is still pending"}}
                 original_question = self.vault.detokenise(str(pending_operation["payload"].get("question", "")))
-                yield {"chunk": original_question + "\nI couldn't tell whether that was approval. Say yes, no, or describe an edit."}
+                yield {"chunk": original_question + "\nI couldn't understand your reply, please say yes or no."}
                 return
 
             if classification.unrelated_command and not expired:

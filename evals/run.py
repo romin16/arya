@@ -82,7 +82,7 @@ async def _live_memory_routing(dataset: list[dict]):
     router = ChatOpenAI(
         model=settings["aux"], api_key=api_key, temperature=0,
         max_completion_tokens=512, timeout=30, max_retries=1,
-    ).with_structured_output(RouteDecision)
+    ).with_structured_output(RouteDecision, method="json_schema", strict=True)
     return await evaluate_memory_routing(router, dataset)
 
 
@@ -261,7 +261,7 @@ async def _live_approvals(dataset: list[dict]):
 
         class Router:
             async def ainvoke(self, messages):
-                return RouteDecision(likely_skills=active, memory_intent="none")
+                return RouteDecision(likely_skills=active, memory_reads=[], memory_intent="none")
 
         runtime.router_model = Router()
         async def load_skill(name: str) -> str:
@@ -293,6 +293,36 @@ async def _live_approvals(dataset: list[dict]):
     return results
 
 
+async def _live_structured_schemas():
+    import os
+    from dotenv import load_dotenv
+    from langchain_openai import ChatOpenAI
+
+    from core.graph.runtime import STRUCTURED_OUTPUT_MODELS
+
+    root = Path(__file__).resolve().parents[1]
+    load_dotenv(root / ".env")
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY is required for --suite structured-schemas --live")
+    model_settings = yaml.safe_load((root / "config" / "models.yaml").read_text(encoding="utf-8"))
+    prompts = {
+        "RouteDecision": "Route 'What time is it?' with no skills, no memory reads, and no memory intent.",
+        "ApprovalClassification": "The user replied 'I am not sure' to an approval question. Classify as unclear.",
+        "MemoryWrite": "Extract memories from 'What time is it?'. Return empty stores and no episode.",
+    }
+    llm = ChatOpenAI(
+        model=model_settings["aux"], api_key=api_key, temperature=0,
+        max_completion_tokens=512, timeout=30, max_retries=1,
+    )
+    results = []
+    for schema in STRUCTURED_OUTPUT_MODELS:
+        runnable = llm.with_structured_output(schema, method="json_schema", strict=True)
+        output = await runnable.ainvoke(prompts[schema.__name__])
+        results.append({"schema": schema.__name__, "valid": isinstance(output, schema)})
+    return results
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--models", default="gpt-4o,gpt-4o-mini")
@@ -315,6 +345,18 @@ def main():
             )
         print(f"approvals: {sum(row['pass'] for row in results)}/{len(results)} pass")
         raise SystemExit(0 if all(row["pass"] for row in results) else 1)
+    if args.suite == "structured-schemas":
+        from core.graph.runtime import STRUCTURED_OUTPUT_MODELS
+
+        if not args.live:
+            print(f"Loaded {len(STRUCTURED_OUTPUT_MODELS)} strict structured-output schemas; no model calls were made.")
+            return
+        results = asyncio.run(_live_structured_schemas())
+        print("schema\tresult")
+        for result in results:
+            print(f"{result['schema']}\t{'PASS' if result['valid'] else 'FAIL'}")
+        print(f"structured-schemas: {sum(row['valid'] for row in results)}/{len(results)} pass")
+        raise SystemExit(0 if all(row["valid"] for row in results) else 1)
     selected = [dataset_dir / "memory-routing.yaml"] if args.suite == "memory-routing" else list(dataset_dir.glob("*.yaml"))
     datasets = [yaml.safe_load(path.read_text(encoding="utf-8")) for path in selected]
     cases = sum(sum(len(row.get("utterances", [row.get("utterance", "")])) + len(row.get("negatives", [])) for row in data)

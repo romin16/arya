@@ -129,10 +129,26 @@ async def test_sse_errors_emit_apology_error_activity_and_done():
         response = await client.post("/chat", json={"message": "hi", "user_id": "user-test"})
     events = [json.loads(line[6:]) for line in response.text.splitlines() if line.startswith("data: ")]
     assert events[0].get("session_id")
-    assert events[1] == {"chunk": "I couldn't reach my assistant services just now."}
-    assert events[2] == {"activity": {"event": "Error", "message": "Core service unavailable"}}
+    assert events[1] == {"chunk": "I hit an internal error while handling that request."}
+    assert events[2] == {"activity": {"event": "Error", "message": "Request failed"}}
     assert events[3] == {"done": True}
     assert "raw error detail" not in response.text
+
+
+@pytest.mark.asyncio
+async def test_sse_connection_failures_use_assistant_services_message():
+    class BrokenRuntime:
+        async def stream_turn(self, request, session_id):
+            raise httpx.ConnectError("connection refused")
+            yield  # pragma: no cover
+
+    app.state.runtime = BrokenRuntime()
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://core") as client:
+        response = await client.post("/chat", json={"message": "hi", "user_id": "user-test"})
+    events = [json.loads(line[6:]) for line in response.text.splitlines() if line.startswith("data: ")]
+    assert events[1] == {"chunk": "I couldn't reach my assistant services just now."}
+    assert events[2] == {"activity": {"event": "Error", "message": "Core service unavailable"}}
 
 
 @pytest.mark.asyncio
@@ -157,7 +173,7 @@ async def test_programmatic_approve_endpoint_forwards_decision_and_edits():
 class FakeRouter:
     async def ainvoke(self, messages):
         assert isinstance(messages[-1], HumanMessage)
-        return RouteDecision(likely_skills=["whatsapp"], memory_intent="none")
+        return RouteDecision(likely_skills=["whatsapp"], memory_reads=[], memory_intent="none")
 
 
 class FakePool:
@@ -318,7 +334,7 @@ async def test_email_request_with_real_server_schemas_passes_strict_egress():
             assert "Last action" in messages[0].content
             return RouteDecision(
                 likely_skills=["email"],
-                memory_reads=[{"store": "episode", "query": "prior email request"}],
+                memory_reads=[{"store": "episode", "query": "prior email request", "date": None}],
                 memory_intent="episode_read",
             )
 
@@ -448,7 +464,11 @@ async def test_runtime_start_checks_google_tools_with_mocked_servers(monkeypatch
             return None
 
     class StartupModel:
-        def with_structured_output(self, schema):
+        def __init__(self):
+            self.schemas = []
+
+        def with_structured_output(self, schema, **options):
+            self.schemas.append((schema, options))
             return self
 
     class StartupMCPClient:
@@ -482,7 +502,8 @@ async def test_runtime_start_checks_google_tools_with_mocked_servers(monkeypatch
     monkeypatch.setattr(runtime_module, "AsyncConnectionPool", StartupPool)
     monkeypatch.setattr(runtime_module, "AsyncPostgresSaver", StartupSaver)
     monkeypatch.setattr(runtime_module, "MultiServerMCPClient", StartupMCPClient)
-    monkeypatch.setattr(runtime_module, "ChatOpenAI", lambda **kwargs: StartupModel())
+    startup_model = StartupModel()
+    monkeypatch.setattr(runtime_module, "ChatOpenAI", lambda **kwargs: startup_model)
 
     runtime = CoreGraphRuntime()
     if missing_required:
@@ -498,6 +519,10 @@ async def test_runtime_start_checks_google_tools_with_mocked_servers(monkeypatch
     assert "authorized@example.com" not in runtime.authorized_account_token
     assert "gmail_search" in runtime.tools
     assert not any("drive" in name or "task" in name for name in runtime.tools)
+    assert {schema.__name__ for schema, _ in startup_model.schemas} == {
+        "RouteDecision", "ApprovalClassification", "MemoryWrite",
+    }
+    assert all(options == {"method": "json_schema", "strict": True} for _, options in startup_model.schemas)
     await runtime.close()
 
 
@@ -530,7 +555,7 @@ async def test_protected_email_action_returns_clear_refusal_without_calling_goog
 
     class EmailRouter:
         async def ainvoke(self, messages):
-            return RouteDecision(likely_skills=["email"], memory_intent="none")
+            return RouteDecision(likely_skills=["email"], memory_reads=[], memory_intent="none")
 
     class ProtectedActionModel:
         def __init__(self):

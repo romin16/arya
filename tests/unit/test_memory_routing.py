@@ -143,7 +143,7 @@ async def test_route_uses_one_structured_call_and_passes_last_action_to_resolve_
 
         async def ainvoke(self, messages):
             self.calls.append(messages)
-            return RouteDecision(likely_skills=["spotify"], memory_intent="none")
+            return RouteDecision(likely_skills=["spotify"], memory_reads=[], memory_intent="none")
 
     class Agent:
         def __init__(self):
@@ -200,7 +200,7 @@ async def test_route_uses_one_structured_call_and_passes_last_action_to_resolve_
 async def test_model_cannot_turn_ordinary_commands_into_procedural_write_replies(utterance):
     class Router:
         async def ainvoke(self, messages):
-            return RouteDecision(likely_skills=["vscode"], memory_intent="procedural_write")
+            return RouteDecision(likely_skills=["vscode"], memory_reads=[], memory_intent="procedural_write")
 
     class Agent:
         def bind_tools(self, tools):
@@ -284,7 +284,7 @@ async def test_mocked_model_cannot_bypass_hard_contact_rule_for_whatsapp_send():
 
     class Router:
         async def ainvoke(self, messages):
-            return RouteDecision(likely_skills=["whatsapp"], memory_intent="none")
+            return RouteDecision(likely_skills=["whatsapp"], memory_reads=[], memory_intent="none")
 
     class Memory:
         async def always_context_and_procedures(self, user_id, *, token_budget):
@@ -353,7 +353,7 @@ async def test_background_writer_logs_empty_extraction_and_persistence(caplog):
     caplog.set_level(logging.INFO, logger="arya.core")
     class Writer:
         async def ainvoke(self, messages):
-            return MemoryWrite()
+            return MemoryWrite(entities=[], procedures=[], episode=None, patterns=[])
 
     class Memory:
         async def write_records(self, user_id, thread_id, records, *, user_texts, memory_management_turn=False):
