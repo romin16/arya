@@ -588,6 +588,42 @@ class CoreGraphRuntime:
         self.background_tasks: set[asyncio.Task] = set()
         self.scheduler = None
 
+    def _register_tool_registry(
+        self,
+        raw_device_tools: list[Any],
+        raw_google_tools: list[Any],
+        native_tools: dict[str, Any],
+    ) -> None:
+        """Build the exact startup registry from MCP discovery results and native tools."""
+        self.device_tools = {
+            tool.name: MCPToolAdapter(
+                public_name=tool.name,
+                source_tool=tool,
+                description=DEVICE_TOOL_DESCRIPTIONS.get(tool.name, tool.description or tool.name),
+                timeout_seconds=float(self.limits.get("tool_timeout_seconds", 30)),
+                retries=1,
+                error_label="device tool",
+            ).as_langchain_tool()
+            for tool in raw_device_tools
+        }
+        missing = DEVICE_TOOL_NAMES - self.device_tools.keys()
+        if missing:
+            raise RuntimeError(f"The device MCP server is missing tools: {', '.join(sorted(missing))}")
+
+        raw_google_by_name = {tool.name: tool for tool in raw_google_tools}
+        missing_google = GOOGLE_REQUIRED_SOURCES - raw_google_by_name.keys()
+        if missing_google:
+            raise RuntimeError(
+                "The pinned Google Workspace MCP server is missing tools: "
+                + ", ".join(sorted(missing_google))
+            )
+        google_tools = adapt_google_tools(
+            raw_google_tools,
+            timeout_seconds=float(self.limits.get("tool_timeout_seconds", 30)),
+            retries=1,
+        )
+        self.tools = {**self.device_tools, **google_tools, **native_tools}
+
     async def start(self) -> None:
         load_dotenv(ROOT / ".env")
         database_url = os.getenv("DATABASE_URL", "")
@@ -655,35 +691,8 @@ class CoreGraphRuntime:
         )
         self.mcp_client = MultiServerMCPClient({"device": device_connection})
         raw_device_tools = await self.mcp_client.get_tools(server_name="device")
-        self.device_tools = {
-            tool.name: MCPToolAdapter(
-                public_name=tool.name,
-                source_tool=tool,
-                description=DEVICE_TOOL_DESCRIPTIONS.get(tool.name, tool.description or tool.name),
-                timeout_seconds=float(self.limits.get("tool_timeout_seconds", 30)),
-                retries=1,
-                error_label="device tool",
-            ).as_langchain_tool()
-            for tool in raw_device_tools
-        }
-        missing = DEVICE_TOOL_NAMES - self.device_tools.keys()
-        if missing:
-            raise RuntimeError(f"The device MCP server is missing tools: {', '.join(sorted(missing))}")
-
         self.google_mcp_client = MultiServerMCPClient({"google_workspace": google_connection})
         raw_google_tools = await self.google_mcp_client.get_tools(server_name="google_workspace")
-        raw_google_by_name = {tool.name: tool for tool in raw_google_tools}
-        missing_google = GOOGLE_REQUIRED_SOURCES - raw_google_by_name.keys()
-        if missing_google:
-            raise RuntimeError(
-                "The pinned Google Workspace MCP server is missing tools: "
-                + ", ".join(sorted(missing_google))
-            )
-        google_tools = adapt_google_tools(
-            raw_google_tools,
-            timeout_seconds=float(self.limits.get("tool_timeout_seconds", 30)),
-            retries=1,
-        )
 
         self.http_client = httpx.AsyncClient(
             timeout=60,
@@ -695,7 +704,7 @@ class CoreGraphRuntime:
             SearchService(self.search_client),
             WeatherService(self.weather_client),
         )
-        self.tools = {**self.device_tools, **google_tools, **native_tools}
+        self._register_tool_registry(raw_device_tools, raw_google_tools, native_tools)
         self.main_model = ChatOpenAI(
             model=model_settings["main"],
             api_key=api_key,

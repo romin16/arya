@@ -48,7 +48,7 @@ The Phase 6 acceptance coverage is mapped to the checked-in tests below. The Pos
 | --- | --- |
 | LangGraph interrupt and Postgres resume | `tests/integration/test_phase6_interrupt_postgres.py::test_installed_langgraph_interrupt_resume_with_postgres_checkpointer` |
 | Policy configuration and startup validation | `tests/unit/test_policy_gate.py`; `tests/unit/test_core_graph.py::test_runtime_start_checks_google_tools_with_mocked_servers` |
-| Approval before side effects, approve/reject/edit/unclear, expiry, bundling, pending thread and `/approve` | `tests/integration/test_memory_postgres.py::test_graph_approval_restores_self_recipient_and_executes_only_after_confirm` and the approval tests that follow it |
+| Approval before side effects, approve/reject/edit/unclear, expiry, bundling, pending thread and `/approve` | `tests/integration/test_memory_postgres.py::test_approval_uses_real_skills_schemas_and_startup_registry` (email, WhatsApp, VS Code) and the approval tests that follow it |
 | Honest action and memory claims | `tests/integration/test_memory_postgres.py::test_verifier_regenerates_unsupported_action_and_memory_claims_once` |
 | Tool-result taint and side-effect escalation | `tests/integration/test_memory_postgres.py::test_untrusted_search_result_taints_turn_and_escalates_auto_create_to_approval` |
 | Input/output token and tool-round caps | `tests/integration/test_memory_postgres.py::test_turn_token_cap_returns_honest_message_without_calling_model`; `test_tool_round_cap_stops_before_extra_tool_and_does_not_claim_it_succeeded` |
