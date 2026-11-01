@@ -1,0 +1,25 @@
+- id: email_to_self
+  skill: email
+  utterance: Send an email to myself saying hi.
+  tool: gmail_send
+  interrupt: true
+- id: whatsapp_message
+  skill: whatsapp
+  utterance: Message Test Contact on WhatsApp saying hi.
+  tool: whatsapp_send
+  interrupt: true
+- id: vscode_terminal_command
+  skill: vscode
+  utterance: Run echo hello in the VS Code terminal.
+  tool: vscode_run_command
+  interrupt: true
+- id: close_notepad
+  skill: desktop
+  utterance: Close Notepad.
+  tool: close_app
+  interrupt: false
+- id: spotify_play
+  skill: spotify
+  utterance: Play lofi hip hop.
+  tool: spotify_play
+  interrupt: false

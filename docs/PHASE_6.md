@@ -57,6 +57,8 @@ The Phase 6 acceptance coverage is mapped to the checked-in tests below. The Pos
 
 `pytest -q` and `ruff check .` passed after each numbered step. The final full suite passed against a fresh disposable local PostgreSQL database. Automated tests use mocks for all external service and GUI calls. No `temp_*.py` helpers were present to move or delete; reusable smoke scripts live under `scripts/`, and `.gitignore` explicitly excludes `temp_*.py`.
 
+The live OpenAI approvals eval (`python -m evals.run --suite approvals --live`) passed 5/5: email-to-self, WhatsApp message, and VS Code command selected ask tools and paused; close Notepad and Spotify play selected auto tools and did not pause. Every tool implementation in this eval is an inert mock.
+
 ## Manual end-to-end check
 
 Use the real UI only for an email to the authorized account owner, review the approval text, and approve only if both recipient and content are correct. See the final Phase 6 completion instructions for PowerShell and psql commands. Do not test against another person's account or contact.

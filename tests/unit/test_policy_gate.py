@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import pytest
+import yaml
 
 from core.policy_gate import ToolPolicy
 
@@ -39,3 +40,15 @@ def test_taint_escalates_only_auto_side_effects():
     assert policy.mode_for("contacts_create", {"given_name": "Test"}, tainted=True) == "ask"
     assert policy.mode_for("gmail_search", {"query": "robotics"}, tainted=True) == "auto"
     assert policy.mode_for("calculator", {"expression": "2+2"}, tainted=True) == "auto"
+
+
+def test_live_approval_eval_cases_match_configured_policy():
+    root = Path(__file__).resolve().parents[2]
+    cases = yaml.safe_load((root / "evals/datasets/approvals.yaml").read_text(encoding="utf-8"))
+    config = yaml.safe_load((root / "config/policy.yaml").read_text(encoding="utf-8"))
+    policy = ToolPolicy(config, {
+        "gmail_send", "whatsapp_send", "vscode_run_command", "close_app", "spotify_play",
+    } | set(config["tools"]))
+    assert len(cases) == 5
+    for case in cases:
+        assert policy.mode_for(case["tool"], {}) == ("ask" if case["interrupt"] else "auto")
