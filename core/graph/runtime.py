@@ -1015,7 +1015,7 @@ class CoreGraphRuntime:
                 "Use episode for past decisions/events (include an ISO date when the user gives one), knowledge for general reference, "
                 "and pattern for inferred tendencies. Use no memory reads when unnecessary. "
                 "Classify the memory intent as entity_read, episode_read, knowledge_read, entity_update_and_episode_write, "
-                "procedural_write, memory_forget, pattern_read, or none. Use memory_forget only for explicit memory deletion intent; instructions are procedural_write. A current-fact question is entity_read; an explicit job/fact update "
+                "procedural_write, memory_forget, pattern_read, or none. Use memory_forget only for explicit memory deletion intent. Use procedural_write only for an explicit standing instruction, such as a lasting 'never', 'always', 'don't', 'from now on', or 'stop doing' directive. Ordinary one-time commands and edits are none and go to the normal agent. A current-fact question is entity_read; an explicit job/fact update "
                 "is entity_update_and_episode_write; an explicit standing rule is procedural_write. "
                 "Examples: 'What is my current salary?' => entity_read, no routed read; 'What did we decide last April?' "
                 "=> episode_read and a date-filtered episode read; 'How does a SIP work?' => knowledge_read and a knowledge read; "
@@ -1047,10 +1047,20 @@ class CoreGraphRuntime:
             reads = decision.memory_reads if isinstance(decision, RouteDecision) else decision.get("memory_reads", [])
             model_route = decision.memory_intent if isinstance(decision, RouteDecision) else decision.get("memory_intent", "none")
             current_user_text = _text_value(latest.content)
+            parsed_rules = explicit_user_rules([current_user_text])
+            starts_with_standing_rule = bool(re.match(
+                r"^\s*(?:please\s+)?(?:never|always|do\s+not|don't|stop|from\s+now\s+on|going\s+forward)\b",
+                current_user_text,
+                re.I,
+            ))
             if _has_explicit_memory_forget_intent(current_user_text):
                 route_label = "memory_forget"
-            elif re.match(r"^\s*(?:please\s+)?(?:never|always|don't|do\s+not|from\s+now\s+on|going\s+forward|stop\s+doing)\b", current_user_text, re.I):
+            elif parsed_rules and (
+                starts_with_standing_rule or model_route in {"memory_forget", "procedural_write"}
+            ):
                 route_label = "procedural_write"
+            elif model_route == "procedural_write":
+                route_label = "none"
             else:
                 route_label = "none" if model_route == "memory_forget" else model_route
             active = self.skills.activate(likely)
@@ -1089,7 +1099,6 @@ class CoreGraphRuntime:
                         "memory_forget_message": memory_forget_message, "memory_write_skip": True,
                         "token_used": token_used, "token_limit_reached": token_limit_reached}
             if route_label == "procedural_write":
-                parsed_rules = explicit_user_rules([current_user_text])
                 memory_write_skip = True
                 if self.memory is not None and parsed_rules:
                     persisted = await self.memory.write_records(

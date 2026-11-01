@@ -27,8 +27,8 @@ _PREFIX = re.compile(
     re.I,
 )
 _DIRECTIVE = re.compile(
-    r"^\s*(?:please\s+)?(?P<directive>never|do\s+not|don't)\s+"
-    r"(?P<action>message|text|contact|email|call|recommend|suggest|share|send|tell|mention|use|book|schedule)\b"
+    r"^\s*(?:please\s+)?(?P<directive>never|always|do\s+not|don't|stop)\s+"
+    r"(?P<action>doing|message|text|contact|email|call|recommend|suggest|share|send|tell|mention|use|book|schedule|ask)\b"
     r"(?P<rest>.*)$",
     re.I,
 )

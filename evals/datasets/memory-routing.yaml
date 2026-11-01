@@ -92,3 +92,7 @@
       operation: procedural_write
     - utterance: Delete the email draft.
       operation: none
+    - utterance: Run echo hello in the VS Code terminal.
+      operation: none
+    - utterance: Change the text to hello from Arya.
+      operation: none

@@ -193,6 +193,59 @@ async def test_route_uses_one_structured_call_and_passes_last_action_to_resolve_
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("utterance", [
+    "Run echo hello in the VS Code terminal.",
+    "Change the text to hello from Arya.",
+])
+async def test_model_cannot_turn_ordinary_commands_into_procedural_write_replies(utterance):
+    class Router:
+        async def ainvoke(self, messages):
+            return RouteDecision(likely_skills=["vscode"], memory_intent="procedural_write")
+
+    class Agent:
+        def bind_tools(self, tools):
+            self.bound_tools = tools
+            return self
+
+        async def astream(self, messages):
+            yield AIMessageChunk(content="Handled by the normal agent.")
+
+    runtime = CoreGraphRuntime()
+    runtime.router_model = Router()
+    runtime.vault = PIIVault(b"ordinary-command-route", Fernet.generate_key())
+    runtime.memory = None
+    runtime.skills = SkillsRuntime(Path(__file__).resolve().parents[2] / "skills")
+    runtime.main_model = Agent()
+    runtime.saver = MemorySaver()
+    runtime.limits = {"max_tool_rounds": 8, "token_budget": 100, "turn_token_budget": 1000}
+    runtime.persona = "Test persona"
+
+    async def load_skill(name: str) -> str:
+        return runtime.skills.load(name, [])[0]
+
+    runtime.load_skill_tool = StructuredTool.from_function(
+        coroutine=load_skill, name="load_skill", description="load"
+    )
+    graph = runtime._build_graph()
+    events = [event async for event in graph.astream(
+        {
+            "messages": [HumanMessage(content=utterance)],
+            "user_id": "test-user",
+            "thread_id": f"ordinary-{abs(hash(utterance))}",
+            "active_skills": [],
+            "memory_context": "",
+            "tainted": False,
+            "tool_rounds": 0,
+        },
+        config={"configurable": {"thread_id": f"ordinary-{abs(hash(utterance))}"}},
+        stream_mode="custom",
+    )]
+    streamed = "".join(event.get("text", "") for event in events if event.get("kind") == "token")
+    assert streamed == "Handled by the normal agent."
+    assert "couldn't identify a direct standing instruction" not in streamed
+
+
+@pytest.mark.asyncio
 async def test_memory_write_is_queued_without_waiting_for_the_writer():
     runtime = CoreGraphRuntime()
     started = asyncio.Event()
