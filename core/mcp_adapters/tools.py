@@ -39,6 +39,7 @@ class MCPToolAdapter:
         args_schema: type[BaseModel] | None = None,
         transform: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
         refusal: str | None = None,
+        error_label: str = "Google MCP tool",
     ):
         self.public_name = public_name
         self.source_tool = source_tool
@@ -48,6 +49,7 @@ class MCPToolAdapter:
         self.args_schema = args_schema or (source_tool.args_schema if source_tool else None)
         self.transform = transform or (lambda args: args)
         self.refusal = refusal
+        self.error_label = error_label
 
     async def ainvoke(self, arguments: dict[str, Any]) -> Any:
         if self.refusal:
@@ -57,7 +59,7 @@ class MCPToolAdapter:
                 "message": self.refusal,
             }
         if self.source_tool is None:
-            raise RuntimeError(f"{self.public_name} is unavailable because its Google MCP tool is missing.")
+            raise RuntimeError(f"{self.error_label} {self.public_name} is unavailable because its source tool is missing.")
         prepared = self.transform(arguments)
         for attempt in range(self.retries + 1):
             try:
@@ -69,14 +71,14 @@ class MCPToolAdapter:
                     continue
                 if isinstance(exc, asyncio.TimeoutError):
                     raise RuntimeError(
-                        f"Google MCP tool {self.public_name} timed out after {self.timeout_seconds:g} seconds."
+                        f"{self.error_label} {self.public_name} timed out after {self.timeout_seconds:g} seconds: {exc}"
                     ) from None
                 if transient_failure(exc):
                     raise RuntimeError(
-                        f"Google MCP tool {self.public_name} failed after a transient error and retry."
+                        f"{self.error_label} {self.public_name} failed after a transient error and retry: {exc}"
                     ) from None
                 raise RuntimeError(
-                    f"Google MCP tool {self.public_name} failed. Check the Google MCP server and tool arguments."
+                    f"{self.error_label} {self.public_name} failed: {exc}"
                 ) from None
 
     def as_langchain_tool(self) -> StructuredTool:

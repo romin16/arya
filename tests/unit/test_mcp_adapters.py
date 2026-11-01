@@ -67,6 +67,9 @@ async def test_google_aliases_wrap_every_tool_and_allow_calls_from_the_approved_
         assert expected in adapted
     assert set(GOOGLE_TOOL_SOURCES) <= adapted.keys()
     assert not any("drive" in name or "task" in name for name in adapted)
+    assert "code policy gate" in adapted["gmail_send"].description
+    assert "do not replace sending with a draft" in adapted["gmail_send"].description
+    assert "code policy gate" in adapted["gmail_reply"].description
 
     send_result = await adapted["gmail_send"].ainvoke(
         {"to": ["test@example.com"], "subject": "x", "body": "y"}
@@ -123,7 +126,11 @@ def test_policy_marks_mail_send_reply_and_deletes_as_ask_and_skills_resolve_nati
 
     skills = SkillsRuntime(Path("skills"))
     assert skills.tool_names(["weather-search"]) == {"get_weather", "web_search"}
-    assert "gmail_reply" in skills.tool_names(["email"])
+    assert {"gmail_send", "gmail_reply"} <= skills.tool_names(["email"])
+    email = skills.skills["email"].body.casefold()
+    assert "disabled until" not in email
+    assert "execution is unavailable" not in email
+    assert "never claim an email was sent until the tool result confirms success" in email
     assert {"contacts_create", "contacts_update", "contacts_delete"} <= skills.tool_names(["contacts"])
 
 

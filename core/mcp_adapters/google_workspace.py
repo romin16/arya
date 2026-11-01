@@ -124,7 +124,19 @@ def adapt_google_tools(
         elif public_name == "gmail_reply":
             transform = None
             schema = ReplyEmailArgs
-            description = "Reply in the existing Gmail thread. This action requires user approval."
+            description = (
+                "Send the requested reply in the existing Gmail thread using the provided recipient, subject, "
+                "body, and original message ID. Call this when the user asks to reply; the code policy gate "
+                "automatically requests user approval before sending. Do not claim success until the tool result confirms it."
+            )
+        elif public_name == "gmail_send":
+            transform = None
+            description = (
+                "Send the email requested by the user with the provided recipient, subject, and body. "
+                "Call this when the user asks to send email; do not replace sending with a draft unless requested. "
+                "The code policy gate automatically requests user approval before sending. Do not claim success "
+                "until the tool result confirms it."
+            )
         else:
             transform = None
             if raw:
