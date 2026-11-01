@@ -3,9 +3,9 @@ from __future__ import annotations
 
 import hmac
 import os
+import sys
 from pathlib import Path
 from typing import Any
-
 from mcp.server.fastmcp import FastMCP
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
@@ -15,6 +15,16 @@ from device.queue import SerialDesktopQueue
 from device.legacy_agents.desktop_agent_v2 import DesktopAgent
 from device.legacy_agents.vscode_agent import VSCodeAgent
 from device.legacy_agents.whatsapp_agent import WhatsAppAgent
+
+
+def _configure_utf8_stdio() -> None:
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            reconfigure(encoding="utf-8", errors="replace")
+
+
+_configure_utf8_stdio()
 
 
 def _load_dotenv() -> None:

@@ -1,6 +1,7 @@
 import asyncio
 import importlib
 import inspect
+import io
 import json
 import sys
 import threading
@@ -91,6 +92,32 @@ async def test_concurrent_gui_tools_are_serial_and_use_mocked_pyautogui(monkeypa
         ("write", "mock two"),
         ("write", "mock one"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_spotify_tool_survives_cp1252_redirected_stdout(monkeypatch):
+    stdout_bytes = io.BytesIO()
+    stderr_bytes = io.BytesIO()
+    redirected_stdout = io.TextIOWrapper(stdout_bytes, encoding="cp1252", errors="strict")
+    redirected_stderr = io.TextIOWrapper(stderr_bytes, encoding="cp1252", errors="strict")
+    monkeypatch.setattr(sys, "stdout", redirected_stdout)
+    monkeypatch.setattr(sys, "stderr", redirected_stderr)
+    server, _, _, _ = load_device_server(monkeypatch)
+    server.queue = SerialDesktopQueue(action_timeout=2)
+
+    def legacy_action(query):
+        print("❌ legacy diagnostic", flush=True)
+        return {"success": True, "query": query}
+
+    monkeypatch.setattr(server.desktop, "spotify_search", legacy_action)
+    result = await server.spotify_play("lofi hip hop")
+
+    assert result["success"] is True
+    assert redirected_stdout.encoding.lower().replace("-", "") == "utf8"
+    assert redirected_stdout.errors == "replace"
+    assert redirected_stderr.encoding.lower().replace("-", "") == "utf8"
+    assert redirected_stderr.errors == "replace"
+    assert "❌ legacy diagnostic" in stdout_bytes.getvalue().decode("utf-8")
 
 
 @pytest.mark.asyncio

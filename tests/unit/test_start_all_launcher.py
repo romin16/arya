@@ -5,6 +5,8 @@ def test_launcher_unbuffers_services_and_routes_both_log_streams():
     launcher = Path("deploy/start_all.ps1").read_text(encoding="utf-8")
 
     assert "$env:PYTHONUNBUFFERED = '1'" in launcher
+    assert "$env:PYTHONUTF8 = '1'" in launcher
+    assert "$env:PYTHONIOENCODING = 'utf-8'" in launcher
     assert "-RedirectStandardOutput $ServiceLogPath" in launcher
     assert "-RedirectStandardError $ErrorLogPath" in launcher
 

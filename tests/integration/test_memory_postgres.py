@@ -967,6 +967,114 @@ async def test_untrusted_search_result_taints_turn_and_escalates_auto_create_to_
 
 
 @pytest.mark.asyncio
+async def test_taint_is_cleared_before_a_new_chat_turn_on_the_same_thread():
+    database_url = os.environ["ARYA_TEST_DATABASE_URL"]
+    session = f"phase6-taint-reset-{uuid4().hex}"
+    user_id = f"memory-user-{uuid4().hex}"
+
+    class Router:
+        async def ainvoke(self, messages):
+            return RouteDecision(likely_skills=["weather-search"], memory_intent="none")
+
+    class Agent:
+        def __init__(self):
+            self.calls = 0
+
+        def bind_tools(self, tools):
+            return self
+
+        async def astream(self, messages):
+            self.calls += 1
+            if self.calls == 1:
+                yield AIMessageChunk(content="", tool_call_chunks=[{
+                    "name": "web_search", "args": json.dumps({"query": "mock result"}),
+                    "id": "taint-reset-search", "index": 0,
+                }])
+            else:
+                yield AIMessageChunk(content="The search result was reviewed.")
+
+    async def web_search(query: str):
+        return {"results": [{"title": "Mock", "snippet": "untrusted words", "url": "https://example.test"}]}
+
+    runtime = await _runtime(database_url, writer=ScriptedWriter(), session=session)
+    runtime.router_model = Router()
+    runtime.main_model = Agent()
+    runtime.tools = {
+        "web_search": StructuredTool.from_function(
+            coroutine=web_search, name="web_search", description="Mock search",
+        ),
+    }
+    runtime.device_tools = {}
+    runtime.policy = ToolPolicy({"tools": {"*": {"mode": "auto"}}}, {
+        "web_search", "load_skill", "memory_search", "memory_forget",
+    })
+    try:
+        await _turn(runtime, "Search for a test result.", user_id)
+        snapshot = await runtime.graph.aget_state({"configurable": {"thread_id": session}})
+        assert snapshot.values["tainted"] is True
+
+        await _turn(runtime, "Tell me a harmless fact.", user_id)
+        snapshot = await runtime.graph.aget_state({"configurable": {"thread_id": session}})
+        assert snapshot.values["tainted"] is False
+    finally:
+        await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_device_tool_error_is_preserved_with_device_context_for_the_model():
+    database_url = os.environ["ARYA_TEST_DATABASE_URL"]
+    session = f"phase6-device-error-{uuid4().hex}"
+    user_id = f"memory-user-{uuid4().hex}"
+    received_tool_error = []
+
+    class Router:
+        async def ainvoke(self, messages):
+            return RouteDecision(likely_skills=["spotify"], memory_intent="none")
+
+    class Agent:
+        def __init__(self):
+            self.calls = 0
+
+        def bind_tools(self, tools):
+            return self
+
+        async def astream(self, messages):
+            self.calls += 1
+            if self.calls == 1:
+                yield AIMessageChunk(content="", tool_call_chunks=[{
+                    "name": "spotify_play", "args": json.dumps({"query": "lofi"}),
+                    "id": "device-error-play", "index": 0,
+                }])
+            else:
+                tool_result = next(message for message in messages if isinstance(message, ToolMessage))
+                received_tool_error.append(tool_result.content)
+                yield AIMessageChunk(content="Spotify did not start.")
+
+    async def broken_play(query: str):
+        raise RuntimeError("device tool spotify_play failed: 'charmap' codec cannot encode U+274C")
+
+    runtime = await _runtime(database_url, writer=ScriptedWriter(), session=session)
+    runtime.router_model = Router()
+    runtime.main_model = Agent()
+    runtime.tools = {}
+    runtime.device_tools = {
+        "spotify_play": StructuredTool.from_function(
+            coroutine=broken_play, name="spotify_play", description="Play Spotify",
+        ),
+    }
+    runtime.policy = ToolPolicy({"tools": {"*": {"mode": "auto"}}}, {
+        "spotify_play", "load_skill", "memory_search", "memory_forget",
+    })
+    try:
+        await _turn(runtime, "Play lofi.", user_id)
+        assert received_tool_error == [
+            "device tool spotify_play failed: 'charmap' codec cannot encode U+274C",
+        ]
+    finally:
+        await runtime.close()
+
+
+@pytest.mark.asyncio
 async def test_turn_token_cap_returns_honest_message_without_calling_model():
     database_url = os.environ["ARYA_TEST_DATABASE_URL"]
     session = f"phase6-token-cap-{uuid4().hex}"

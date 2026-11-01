@@ -1437,7 +1437,16 @@ class CoreGraphRuntime:
                         continue
                     if "unknown token" in message:
                         content = "unknown token"
-                    elif "Google MCP tool " in message or "Google CSE" in message or "Tavily" in message or "Brave Search" in message or "location" in message or "expression" in message or "calculate" in message:
+                    elif (
+                        "Google MCP tool " in message
+                        or "device tool " in message
+                        or "Google CSE" in message
+                        or "Tavily" in message
+                        or "Brave Search" in message
+                        or "location" in message
+                        or "expression" in message
+                        or "calculate" in message
+                    ):
                         content = message
                     else:
                         content = "tool execution failed"

@@ -117,6 +117,20 @@ async def test_adapter_times_out_and_reports_clear_message():
         await adapter.ainvoke({"query": "hello"})
 
 
+@pytest.mark.asyncio
+async def test_device_adapter_error_keeps_device_name_and_underlying_encoding_error():
+    async def broken(query: str):
+        raise UnicodeEncodeError("charmap", "❌", 0, 1, "character maps to <undefined>")
+
+    source = StructuredTool.from_function(coroutine=broken, name="spotify_play", description="mock")
+    adapter = MCPToolAdapter(
+        public_name="spotify_play", source_tool=source, description="play",
+        error_label="device tool", retries=0,
+    )
+    with pytest.raises(RuntimeError, match=r"device tool spotify_play failed: 'charmap' codec can't encode"):
+        await adapter.ainvoke({"query": "lofi"})
+
+
 def test_policy_marks_mail_send_reply_and_deletes_as_ask_and_skills_resolve_native_tools():
     policy = yaml.safe_load(Path("config/policy.yaml").read_text(encoding="utf-8"))
     assert policy["tools"]["gmail_send"]["mode"] == "ask"

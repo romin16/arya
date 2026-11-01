@@ -5,6 +5,8 @@ param(
 $ErrorActionPreference = 'Stop'
 $Root = Split-Path -Parent $PSScriptRoot
 $env:PYTHONUNBUFFERED = '1'
+$env:PYTHONUTF8 = '1'
+$env:PYTHONIOENCODING = 'utf-8'
 $Python = Join-Path $Root '.venv\Scripts\python.exe'
 $EnvFile = Join-Path $Root '.env'
 if (-not (Test-Path $Python)) { throw 'Create .venv with Python 3.11+ and install the project before launch.' }
