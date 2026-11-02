@@ -125,6 +125,8 @@ async def test_memory_routing_eval_uses_mock_structured_llm_for_paraphrases_and_
         async def ainvoke(self, messages):
             assert isinstance(messages[0], SystemMessage)
             assert isinstance(messages[1], HumanMessage)
+            assert "Change the text to hello from Arya. => none." in messages[0].content
+            assert "One-time commands and edits" in messages[0].content
             intent, store = expected_by_phrase[messages[1].content.casefold()]
             reads = [SimpleNamespace(store=store)] if store else []
             return SimpleNamespace(memory_intent=intent, memory_reads=reads)
@@ -193,14 +195,14 @@ async def test_route_uses_one_structured_call_and_passes_last_action_to_resolve_
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("utterance", [
-    "Run echo hello in the VS Code terminal.",
-    "Change the text to hello from Arya.",
+@pytest.mark.parametrize(("utterance", "intent"), [
+    ("Run echo hello in the VS Code terminal.", "procedural_write"),
+    ("Change the text to hello from Arya.", "entity_update_and_episode_write"),
 ])
-async def test_model_cannot_turn_ordinary_commands_into_procedural_write_replies(utterance):
+async def test_model_cannot_turn_ordinary_commands_into_memory_routing(utterance, intent):
     class Router:
         async def ainvoke(self, messages):
-            return RouteDecision(likely_skills=["vscode"], memory_reads=[], memory_intent="procedural_write")
+            return RouteDecision(likely_skills=["vscode"], memory_reads=[], memory_intent=intent)
 
     class Agent:
         def bind_tools(self, tools):
@@ -217,7 +219,7 @@ async def test_model_cannot_turn_ordinary_commands_into_procedural_write_replies
     runtime.skills = SkillsRuntime(Path(__file__).resolve().parents[2] / "skills")
     runtime.main_model = Agent()
     runtime.saver = MemorySaver()
-    runtime.limits = {"max_tool_rounds": 8, "token_budget": 100, "turn_token_budget": 1000}
+    runtime.limits = {"max_tool_rounds": 8, "token_budget": 1000, "turn_token_budget": 5000}
     runtime.persona = "Test persona"
 
     async def load_skill(name: str) -> str:
@@ -243,6 +245,8 @@ async def test_model_cannot_turn_ordinary_commands_into_procedural_write_replies
     streamed = "".join(event.get("text", "") for event in events if event.get("kind") == "token")
     assert streamed == "Handled by the normal agent."
     assert "couldn't identify a direct standing instruction" not in streamed
+    snapshot = await graph.aget_state({"configurable": {"thread_id": f"ordinary-{abs(hash(utterance))}"}})
+    assert snapshot.values["route_label"] == "none"
 
 
 @pytest.mark.asyncio

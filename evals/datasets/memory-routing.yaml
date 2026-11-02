@@ -96,3 +96,11 @@
       operation: none
     - utterance: Change the text to hello from Arya.
       operation: none
+- id: one_time_commands_and_edits
+  operation: none
+  utterances:
+    - Change the text to hello from Arya.
+    - Change the email body to revised approval text.
+    - Run echo hello in the VS Code terminal.
+    - Open Notepad.
+    - Set the VS Code document title to Hello.

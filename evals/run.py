@@ -20,7 +20,8 @@ async def evaluate_memory_routing(router, dataset: list[dict]):
         "pattern_read (recall a stated recurring preference or behavior), "
         "or none (no personal memory read or write). memory_reads may contain only episode, knowledge, or pattern. "
         "For episode/knowledge/pattern reads, include a concise search query in memory_reads. For entity reads and writes, "
-        "use the always-injected current entity store and return no routed read. Never infer personal facts from a general question.\n\n"
+        "use the always-injected current entity store and return no routed read. Never infer personal facts from a general question. "
+        "One-time commands and edits to text, messages, documents, files, or UI are none, never entity updates.\n\n"
         "Examples:\n"
         "User: What is my current salary? => entity_read, no memory_reads.\n"
         "User: What did we decide last April? => episode_read, one episode read with the date and decision query.\n"
@@ -31,6 +32,10 @@ async def evaluate_memory_routing(router, dataset: list[dict]):
         "User: Delete the email draft. => none.\n"
         "User: I'm worried about market volatility. => pattern_read, one pattern read.\n"
         "User: What is the average salary for a Python developer? => none.\n"
+        "User: Change the text to hello from Arya. => none.\n"
+        "User: Change the email body to revised approval text. => none.\n"
+        "User: Run echo hello in the VS Code terminal. => none.\n"
+        "User: Open Notepad. => none.\n"
         "User: What is equity investing? => none."
     )
     results = []

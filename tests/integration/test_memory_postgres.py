@@ -695,9 +695,11 @@ async def test_graph_approval_restores_self_recipient_and_executes_only_after_co
 
 async def _approval_harness(monkeypatch, database_url, session, user_id, recipient, decisions, tool_names=("gmail_send",)):
     calls = []
+    order = []
 
     class Router:
         async def ainvoke(self, messages):
+            order.append("router")
             return RouteDecision(likely_skills=["email"], memory_reads=[], memory_intent="none")
 
     class Agent:
@@ -710,6 +712,7 @@ async def _approval_harness(monkeypatch, database_url, session, user_id, recipie
             return self
 
         async def astream(self, messages):
+            order.append("agent")
             last_user_index = max(
                 index for index, message in enumerate(messages) if isinstance(message, HumanMessage)
             )
@@ -738,6 +741,7 @@ async def _approval_harness(monkeypatch, database_url, session, user_id, recipie
             self.calls = 0
 
         async def ainvoke(self, messages):
+            order.append("approval_classifier")
             _assert_openai_strict_schema(ApprovalClassification)
             result = self.configured[self.calls]
             self.calls += 1
@@ -757,6 +761,7 @@ async def _approval_harness(monkeypatch, database_url, session, user_id, recipie
     runtime.router_model = Router()
     runtime.main_model = Agent(token)
     runtime.approval_model = Classifier(decisions)
+    runtime.approval_order = order
     registered = set(runtime.tools) | set(runtime.memory_tools) | {"load_skill"}
     runtime.policy = ToolPolicy.from_file(ROOT / "config/policy.yaml", registered)
     runtime.authorized_account_token = token
@@ -890,6 +895,27 @@ async def test_approval_edits_change_executed_arguments(monkeypatch):
         assert calls[0][1]["to"] == [old_email]
         assert calls[0][1]["subject"] == "Hello"
         assert calls[0][1]["body"] == "edited approval text"
+        assert runtime.approval_order.count("approval_classifier") == 2
+    finally:
+        await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_pending_approval_reply_reaches_classifier_before_router_or_agent(monkeypatch):
+    database_url = os.environ["ARYA_TEST_DATABASE_URL"]
+    session = f"phase6-classifier-first-{uuid4().hex}"
+    user_id = f"memory-user-{uuid4().hex}"
+    recipient = f"classifier-first-{uuid4().hex[:8]}@arya.dev"
+    runtime, calls, _, _ = await _approval_harness(
+        monkeypatch, database_url, session, user_id, recipient,
+        [ApprovalClassification(decision="approve", edits=[], unrelated_command=False)],
+    )
+    try:
+        await _turn(runtime, "Send an email to myself saying hi.", user_id)
+        assert runtime.approval_order == ["router", "agent"]
+        await _turn(runtime, "yes", user_id)
+        assert runtime.approval_order == ["router", "agent", "approval_classifier", "agent"]
+        assert len(calls) == 1
     finally:
         await runtime.close()
 

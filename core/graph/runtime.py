@@ -650,6 +650,15 @@ def _has_explicit_memory_forget_intent(text: str) -> bool:
     )
 
 
+def _is_one_time_edit(text: str) -> bool:
+    return bool(re.match(
+        r"^\s*(?:change|edit|replace|set|update)\s+(?:(?:the|this|that)\s+)?"
+        r"(?:text|copy|wording|email body|message body|document title|file|code|title|button|label|subject)\b",
+        text,
+        re.I,
+    ))
+
+
 def _extract_forget_query(text: str) -> str | None:
     text = " ".join(text.split()).strip(" .!?;:")
     patterns = (
@@ -1163,7 +1172,10 @@ class CoreGraphRuntime:
                 "'I just changed jobs to TCS' => entity_update_and_episode_write; 'Never recommend equity to me again' "
                 "=> procedural_write; 'Forget the rule about Aditya' => memory_forget; 'I'm worried about market volatility' => pattern_read and a pattern read; "
                 "'Delete the email draft' => none; "
-                "'What is the average salary for a Python developer?' => none. "
+                "'What is the average salary for a Python developer?' => none; "
+                "'Change the text to hello from Arya' => none; 'Change the email body to revised text' => none; "
+                "'Run echo hello in the VS Code terminal' => none; 'Open Notepad' => none. "
+                "A one-time edit to a file, message, or UI is not a stored fact update or standing rule. "
                 "If the request is a short reference such as 'pause it' or 'do it again', use the prior last_action context "
                 "to resolve the reference. Never invent memory facts.\n\n"
                 f"Skill index:\n{index}\nLast action: {json.dumps(last_action, ensure_ascii=False) if last_action else 'none'}"
@@ -1189,6 +1201,9 @@ class CoreGraphRuntime:
             model_route = decision.memory_intent if isinstance(decision, RouteDecision) else decision.get("memory_intent", "none")
             current_user_text = _text_value(latest.content)
             parsed_rules = explicit_user_rules([current_user_text])
+            one_time_edit = _is_one_time_edit(current_user_text)
+            if one_time_edit:
+                reads = []
             starts_with_standing_rule = bool(re.match(
                 r"^\s*(?:please\s+)?(?:never|always|do\s+not|don't|stop|from\s+now\s+on|going\s+forward)\b",
                 current_user_text,
@@ -1200,6 +1215,8 @@ class CoreGraphRuntime:
                 starts_with_standing_rule or model_route in {"memory_forget", "procedural_write"}
             ):
                 route_label = "procedural_write"
+            elif one_time_edit:
+                route_label = "none"
             elif model_route == "procedural_write":
                 route_label = "none"
             else:
