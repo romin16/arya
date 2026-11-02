@@ -21,6 +21,7 @@ import yaml
 import tiktoken
 from dotenv import load_dotenv
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.runnables import RunnableLambda
 from langchain_core.tools import StructuredTool
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_mcp_adapters.client import MultiServerMCPClient
@@ -41,6 +42,7 @@ from core.graph.action_logger import (
 from core.memory.normalization import explicit_user_rules
 from core.memory.repositories import MemoryRepositories
 from core.memory.service import MemoryService
+from core.observability import langfuse_trace_config
 from core.memory.policy_gate import hard_rule_for
 from core.policy_gate import ToolPolicy
 from core.mcp_adapters.google_workspace import (
@@ -89,6 +91,11 @@ FIXED_RULES = (
     "Use PII tokens exactly as given. Never invent tool results."
 )
 logger = logging.getLogger("arya.core")
+
+
+def _with_run_name(runnable, name: str):
+    with_config = getattr(runnable, "with_config", None)
+    return with_config(run_name=name) if callable(with_config) else runnable
 
 
 class StrictStructuredOutput(BaseModel):
@@ -1007,7 +1014,7 @@ class CoreGraphRuntime:
                     else "assistant"
                 )
                 serialised.append({"role": role, "content": self.vault.tokenise(_text_value(message.content))})
-            extracted = await self.memory_writer_model.ainvoke([
+            extracted = await _with_run_name(self.memory_writer_model, "memory_write").ainvoke([
                 SystemMessage(content=(
                     "Extract durable facts, explicit standing rules, a concise episode, and user-stated recurring behavior. "
                     "Process each user message clause separately. Put an explicit 'never', 'do not', or 'don't' instruction "
@@ -1199,7 +1206,7 @@ class CoreGraphRuntime:
                 router_model = self.router_model
                 if hasattr(router_model, "bind"):
                     router_model = router_model.bind(max_completion_tokens=turn_budget - token_used - route_input_tokens)
-                decision = await router_model.ainvoke(route_messages)
+                decision = await _with_run_name(router_model, "router").ainvoke(route_messages)
                 decision_payload = decision.model_dump() if isinstance(decision, RouteDecision) else decision
                 token_used += route_input_tokens + _count_output_tokens(json.dumps(decision_payload, ensure_ascii=False, default=str))
                 token_limit_reached = token_used >= turn_budget
@@ -1277,12 +1284,24 @@ class CoreGraphRuntime:
                         procedural_write_message = "I didn't save that rule because it matches a recently forgotten item."
                 else:
                     procedural_write_message = "I couldn't identify a direct standing instruction to save as a rule."
-            if self.memory is not None:
-                always_task = self.memory.always_context_and_procedures(state["user_id"], token_budget=600)
+            async def read_memory(_input):
+                if self.memory is None:
+                    return {"always": "", "procedures": [], "routed": ""}
+                always_task = self.memory.always_context_and_procedures(
+                    state["user_id"], token_budget=600,
+                )
                 routed_task = self.memory.routed_reads(state["user_id"], reads)
-                (always_context, procedures), routed = await asyncio.gather(always_task, routed_task)
-            else:
-                always_context, procedures, routed = "", [], ""
+                (always_context, procedures), routed = await asyncio.gather(
+                    always_task, routed_task,
+                )
+                return {"always": always_context, "procedures": procedures, "routed": routed}
+
+            memory_result = await RunnableLambda(read_memory).with_config(
+                run_name="memory_reads",
+            ).ainvoke({"reads": reads})
+            always_context = memory_result["always"]
+            procedures = memory_result["procedures"]
+            routed = memory_result["routed"]
             action = last_action or {}
             action_tool = action.get("tool") or action.get("name")
             action_args = action.get("args", {})
@@ -1347,7 +1366,7 @@ class CoreGraphRuntime:
                 model = model.bind(max_completion_tokens=output_limit)
             chunks: list[AIMessageChunk] = []
             aggregate: AIMessageChunk | None = None
-            async for chunk in model.astream(messages):
+            async for chunk in _with_run_name(model, "agent").astream(messages):
                 chunks.append(chunk)
                 aggregate = chunk if aggregate is None else aggregate + chunk
             if aggregate is None:
@@ -1750,7 +1769,7 @@ class CoreGraphRuntime:
                     verifier_model = verifier_model.bind(
                         max_completion_tokens=min(int(self.limits.get("token_budget", turn_budget)), available),
                     )
-                async for chunk in verifier_model.astream(prompt):
+                async for chunk in _with_run_name(verifier_model, "verifier").astream(prompt):
                     if getattr(chunk, "tool_call_chunks", None):
                         continue
                     text = _text_value(chunk.content)
@@ -1887,7 +1906,7 @@ class CoreGraphRuntime:
             # Resolve thread-bound operations before ingest, routing, or model calls.
             pending_operation = await repositories.get_pending_operation(user_id, session_id)
         input_state: ARYAState = {
-            "messages": [HumanMessage(content=request.message, id=f"user-{uuid4()}")],
+            "messages": [HumanMessage(content=self.vault.tokenise(request.message), id=f"user-{uuid4()}")],
             "user_id": user_id,
             "thread_id": session_id,
             "pending_operation": pending_operation,
@@ -1904,7 +1923,10 @@ class CoreGraphRuntime:
             "refusal_message": None,
             "tool_rounds": 0,
         }
-        config = {"configurable": {"thread_id": session_id}}
+        trace_config = langfuse_trace_config(
+            vault=self.vault, session_id=session_id, user_id=user_id,
+        )
+        config = {"configurable": {"thread_id": session_id}, **trace_config}
 
         async def relay(graph_input):
             async for event in self.graph.astream(graph_input, config=config, stream_mode="custom"):

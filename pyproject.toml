@@ -34,7 +34,7 @@ include = ["core*", "device*", "voice*", "evals*", "db*"]
 
 [project.optional-dependencies]
 voice = ["elevenlabs==1.58.1", "sarvamai==0.1.11", "groq==0.26.0"]
-observability = ["langfuse==3.0.8", "logfire[fastapi,psycopg,httpx]==3.20.0"]
+observability = ["langfuse[langchain]==3.0.8", "logfire[fastapi,psycopg,httpx]==3.20.0"]
 device = [
   "pyautogui==0.9.54",
   "pygetwindow==0.0.9",

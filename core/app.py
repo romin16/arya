@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import sys
 import uuid
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import httpx
 import psycopg
@@ -14,8 +16,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from openai import APIConnectionError
+from dotenv import load_dotenv
 
 from core.graph.runtime import CoreGraphRuntime
+from core.observability import configure_logfire
 from core.sse import encode_event
 
 # Psycopg's async libpq integration requires a selector loop on Windows.
@@ -25,6 +29,7 @@ if sys.platform == "win32" and not isinstance(
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 logger = logging.getLogger("arya.core.http")
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def _is_connection_failure(error: BaseException) -> bool:
@@ -46,6 +51,8 @@ def _is_connection_failure(error: BaseException) -> bool:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    load_dotenv(ROOT / ".env")
+    app.state.logfire_enabled = configure_logfire(app)
     runtime = CoreGraphRuntime()
     await runtime.start()
     app.state.runtime = runtime
@@ -85,7 +92,14 @@ async def health():
         "database": "connected" if ready else "not_initialized",
         "mcp": {"device": "connected" if ready else "not_initialized"},
         "device": "connected" if ready else "not_initialized",
-        "observability": "disabled",
+        "observability": {
+            "langfuse": bool(
+                os.getenv("LANGFUSE_PUBLIC_KEY")
+                and os.getenv("LANGFUSE_SECRET_KEY")
+                and os.getenv("LANGFUSE_HOST")
+            ),
+            "logfire": bool(getattr(app.state, "logfire_enabled", False)),
+        },
     }
 
 
