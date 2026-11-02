@@ -4,7 +4,7 @@ Read this file first, then `ARYA_CODEX_PROMPT.md` (the original design brief; th
 
 ## 1. What this project is
 
-ARYA is a personal voice assistant, being migrated from n8n + Flask to a LangGraph agent served by FastAPI. The user is on Windows 10/11, Python 3.12 via `uv`, local PostgreSQL 18 with pgvector, database `arya`. Old code lives in `legacy/` (do not edit; `legacy/arya.html` has its Picovoice key redacted; the user's working copy of `arya.html` is outside the repo and must keep working unchanged).
+ARYA is a personal voice assistant built with LangGraph and FastAPI. The user is on Windows 10/11, Python 3.12 via `uv`, local PostgreSQL 18 with pgvector, database `arya`. Old code lives in `legacy/` (do not edit; `legacy/arya.html` has its Picovoice key redacted; the user's working copy of `arya.html` is outside the repo and must keep working unchanged).
 
 Processes (all bind to 127.0.0.1): arya-core :5000 (FastAPI, LangGraph, SSE `/chat`, `/health`, `POST /approve`), arya-voice :5001 (`/speak`, `/transcribe`, `/stop`), arya-device :5002 (FastMCP, bearer token, one serial GUI queue, `/panic`), Google Workspace MCP :8321 (`snickery/google-accounts-mcp` pinned commit 2839885, installed at `%LOCALAPPDATA%\Arya\google-accounts-mcp`, tokens in `%LOCALAPPDATA%\Arya\google-mcp-data\tokens.db`, outside the repo). Start all: `.\deploy\start_all.ps1`. Logs in `logs/arya-*.log`.
 
@@ -26,28 +26,28 @@ Get-NetTCPConnection -LocalPort 5000,5001,5002,8321 -State Listen -ErrorAction S
 - Phase 5 five-store memory (entities versioned, episodes, knowledge, procedures with code-enforced tool/argument constraints, patterns with N-observations rule), router, background writer, `memory_forget` with thread-bound confirmation, soft delete + tombstones. Verified live.
 - Phase 6 policy gate (`config/policy.yaml`), approvals via `interrupt()`, verifier, injection taint, caps. Verified live: approval question shows the real recipient/content, yes sends, no cancels, edit re-asks (`approval.edit_requires_reconfirm`), audit rows (`awaiting_approval`, `succeeded`, `approved_by`, `approved_at`, `approval_channel`), `pending_operations` cleaned up.
 
-Test status at last full run: 131 passed, ruff clean, live evals all passing (routing 46/46, approvals 5/5, structured schemas 3/3).
+Test status before Phase 7 work: 131 passed, ruff clean, live evals all passing (routing 46/46, approvals 5/5, structured schemas 3/3). The current Phase 7 continuation reran the unit suite (107 passed) and temporary-Postgres integration tests (32 passed); see section 3 for the Langfuse ingestion blocker.
 
-## 3. In progress when the previous session stopped (credits ran out) — VERIFY FIRST
+## 3. Phase 7 continuation status — verify before relying on external services
 
 The last session was in the middle of Phase 7 Part B and its final edits were NOT verified. Treat everything below as unreviewed:
-- `core/observability.py` (new), edits to `core/app.py` and `core/graph/runtime.py`, `tests/unit/test_observability.py` (Langfuse callback handler, Logfire; last edits changed trace/session propagation).
+- `core/observability.py`, edits to `core/app.py`, `core/graph/runtime.py`, and `tests/unit/test_observability.py` (Langfuse callback integration and PII scrubbing). Startup logs `enabled` and `auth_check` without credentials. Unit tests cover recording callbacks and failure safety. The local instance currently returns HTTP 500 on trace ingestion because its web container cannot connect to MinIO at `127.0.0.1:9090`; do not alter `C:\Users\abc\langfuse` or start a second stack. Real trace visibility remains unverified until that existing instance is repaired.
 - `deploy/langfuse/{start,stop,status}.ps1` and README: thin scripts only. Langfuse is ALREADY installed and running on the user's PC at `C:\Users\abc\langfuse` (UI http://localhost:3000, keys already in `.env`). Do not download or start a second copy and do not modify that folder.
 - Versioned migrations: `db/migrations/001_phase1_baseline.sql`, `002_current_graph_schema.sql`, new `db/apply_schema.py`, `db/schema_version.py`, core refuses to start if the database is behind, `tests/integration/test_schema_migrations.py`.
 - A stray `_run_migration_tests.py` in the repo root (helper that creates a temporary database); move it into `scripts/` or delete it.
-- `pyproject.toml` was edited (a dependency pin) and `uv.lock` re-locked.
+- `pyproject.toml` was edited (Langfuse 4.15.6 and LangChain 0.3.30 pins) and `uv.lock` re-locked. The optional infrastructure-tracing integration was removed from code, dependencies, the environment template, and docs.
 
 First actions: `git status`, `git diff --stat`, run `uv sync --locked --extra observability --extra dev --extra voice --extra device`, `uv run ruff check .`, the unit tests, and the Postgres integration tests with a temporary database. Fix anything broken before adding features. Apply migrations to the real `arya` database with `uv run --env-file .env python db/apply_schema.py` and show the output; never touch row data.
 
 ## 4. Remaining work (Phase 7 Part B)
 
-1. B1 Langfuse integration: one trace per `/chat` turn, `session_id` = thread id, `user_id`, spans for router, memory reads, agent, each tool, verifier, memory write; cost and latency. Only PII-tokenised content may be exported (test it).
-2. B2 Logfire: infrastructure spans only (FastAPI, psycopg, httpx), message/prompt content capture OFF, optional via `LOGFIRE_TOKEN`.
-3. B3 Both integrations failure-safe (ARYA must keep working if Langfuse/Logfire are down or unconfigured).
-4. B4 Eval runner: `python -m evals.run` runs every suite (tool-routing, memory-routing, approvals, persona-tone, exact-reply, structured schemas) with `--models gpt-4o,gpt-4o-mini` and prints pass rate, p50/p95 time-to-first-chunk and cost per suite per model; `--push-langfuse` optional. The tool-routing suite must cover Spotify play/pause/resume/next, open/close apps, WhatsApp, email send, calendar create, contacts search, weather, web search, and "pause it"/"do it again".
-5. B5 Cutover: no remaining n8n dependency in scripts/config/docs, `docs/RUNBOOK.md` (fresh Windows machine to working system) and `docs/MIGRATION.md` (what replaced what). Keep `legacy/` untouched.
-6. B6 SSE contract replay test against what `legacy/arya.html` expects: `{"session_id"}` first, then `{"activity":{"event","message"}}`, `{"chunk"}`, `{"done":true}` last, plus the error form.
-7. Make the full extras set the default (or add `scripts/sync.ps1`) so `uv sync` can't drop voice/device packages; services should fail with a clear message naming the missing extra.
+1. B1 Langfuse: code, one `/chat` trace scope, callback spans, tokenization, status logging, and mock tests are implemented. Local ingestion is not verified because the already-running service returns 500 on S3 event upload (see section 3).
+2. Outgoing email content isolation: ensure content/subject derive only from the current user turn or explicit edit; add a real-graph regression test and live eval.
+3. Verify/apply versioned migrations to the user's `arya` database; migration application remains pending.
+4. B4 Eval runner: run every suite with `--models gpt-4o,gpt-4o-mini`, pass rate, p50/p95 first-chunk latency, cost, and optional `--push-langfuse`; expand tool-routing coverage.
+5. B6 SSE contract replay against `legacy/arya.html`, including success and error event forms.
+6. Make the full extras set the default (or add `scripts/sync.ps1`); services should name missing extras.
+7. B5 Cutover docs and n8n audit; update RUNBOOK/MIGRATION and keep `legacy/` untouched. Also verify the STT hallucination filter and move/delete `_run_migration_tests.py` if present.
 
 ## 5. Known open items (not blocking)
 

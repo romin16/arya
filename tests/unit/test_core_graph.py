@@ -10,6 +10,7 @@ import httpx
 import pytest
 from cryptography.fernet import Fernet
 from langchain_core.messages import AIMessageChunk, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages.utils import convert_to_openai_messages
 from langchain_core.tools import StructuredTool
 from langchain_core.utils.function_calling import convert_to_openai_tool
@@ -244,7 +245,7 @@ class FakeAgentModel:
 
 
 @pytest.mark.asyncio
-async def test_custom_graph_tokenises_tool_results_logs_actions_and_detokenises_stream():
+async def test_custom_graph_tokenises_tool_results_logs_actions_and_detokenises_stream(monkeypatch):
     raw_email = "person@arya.dev"
     vault = PIIVault(b"test-hmac-secret", Fernet.generate_key())
     pool = FakePool()
@@ -259,6 +260,22 @@ async def test_custom_graph_tokenises_tool_results_logs_actions_and_detokenises_
         description="mocked local device tool",
     )
     runtime = CoreGraphRuntime()
+    class RecordingHandler(BaseCallbackHandler):
+        def __init__(self):
+            self.started = []
+
+        def on_chain_start(self, serialized, inputs, **kwargs):
+            self.started.append(kwargs.get("name") or (serialized or {}).get("name", ""))
+
+        def on_tool_start(self, serialized, input_str, **kwargs):
+            self.started.append(kwargs.get("name") or (serialized or {}).get("name", ""))
+
+    trace_handler = RecordingHandler()
+    monkeypatch.setattr(
+        runtime_module,
+        "langfuse_trace_config",
+        lambda **kwargs: {"callbacks": [trace_handler], "run_name": "arya.chat"},
+    )
     runtime.vault = vault
     runtime.pool = pool
     runtime.saver = MemorySaver()
@@ -295,6 +312,8 @@ async def test_custom_graph_tokenises_tool_results_logs_actions_and_detokenises_
     assert raw_email not in json.dumps(logged_args)
     assert "[EMAIL_" in json.dumps(logged_args)
     assert agent_model.outbound_payloads
+    assert trace_handler.started
+    assert any("whatsapp_send" in name for name in trace_handler.started)
 
 
 @pytest.mark.asyncio

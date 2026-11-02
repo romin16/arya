@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import sys
 import uuid
 from contextlib import asynccontextmanager
@@ -19,7 +18,7 @@ from openai import APIConnectionError
 from dotenv import load_dotenv
 
 from core.graph.runtime import CoreGraphRuntime
-from core.observability import configure_logfire
+from core.observability import langfuse_chat_trace, langfuse_startup_status
 from core.sse import encode_event
 
 # Psycopg's async libpq integration requires a selector loop on Windows.
@@ -52,7 +51,7 @@ def _is_connection_failure(error: BaseException) -> bool:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     load_dotenv(ROOT / ".env")
-    app.state.logfire_enabled = configure_logfire(app)
+    app.state.langfuse_status = langfuse_startup_status()
     runtime = CoreGraphRuntime()
     await runtime.start()
     app.state.runtime = runtime
@@ -93,12 +92,10 @@ async def health():
         "mcp": {"device": "connected" if ready else "not_initialized"},
         "device": "connected" if ready else "not_initialized",
         "observability": {
-            "langfuse": bool(
-                os.getenv("LANGFUSE_PUBLIC_KEY")
-                and os.getenv("LANGFUSE_SECRET_KEY")
-                and os.getenv("LANGFUSE_HOST")
-            ),
-            "logfire": bool(getattr(app.state, "logfire_enabled", False)),
+            "langfuse": {
+                "enabled": getattr(app.state, "langfuse_status", (False, False))[0],
+                "auth_check": getattr(app.state, "langfuse_status", (False, False))[1],
+            },
         },
     }
 
@@ -113,8 +110,19 @@ async def chat(req: ChatRequest):
         try:
             if runtime is None:
                 raise RuntimeError("Core runtime has not started")
-            async for event in runtime.stream_turn(req, session_id):
-                yield encode_event(event)
+            vault = getattr(runtime, "vault", None)
+            if vault is None:
+                async for event in runtime.stream_turn(req, session_id):
+                    yield encode_event(event)
+            else:
+                async with langfuse_chat_trace(
+                    vault=vault,
+                    session_id=session_id,
+                    user_id=req.user_id,
+                    message=req.message,
+                ):
+                    async for event in runtime.stream_turn(req, session_id):
+                        yield encode_event(event)
         except Exception as exc:
             logger.exception("Core chat turn failed")
             if _is_connection_failure(exc):

@@ -7,7 +7,7 @@ You are migrating a working personal voice assistant ("ARYA") from n8n workflows
 1. The legacy system is in `legacy/` (n8n workflow JSON exports, Python servers/agents, `arya.html`). Read it first. Do **not** edit anything under `legacy/`.
 2. **`arya.html` must work unchanged.** Its backend contract is in section 9. Never modify the HTML.
 3. Never write real secrets into code, tests, logs or commits. Everything comes from `.env` (provide `.env.example` with names only). The legacy files contain hard-coded keys (Picovoice key in `arya.html`, a Google CSE key in the search workflow); do not copy them anywhere.
-4. Library APIs change. Before using LangGraph, langchain-mcp-adapters, FastMCP, Langfuse, Logfire, pydantic-evals or pgvector bindings, check the **installed** version's docs/source. Do not write APIs from memory.
+4. Library APIs change. Before using LangGraph, langchain-mcp-adapters, FastMCP, Langfuse, pydantic-evals or pgvector bindings, check the **installed** version's docs/source. Do not write APIs from memory.
 5. Runs on **Windows 10/11**, Python 3.11+, local PostgreSQL with `pgvector` already installed. Use `uv` or `pip` with a lockfile.
 6. If something is ambiguous or blocked, write the question into `docs/OPEN_QUESTIONS.md`, pick the safest reversible default, and continue. Do not stall.
 7. Small commits, one concern each. Every phase ends with tests green and a short `docs/PHASE_N.md` note.
@@ -23,7 +23,7 @@ arya-core ── LangGraph agent ──► Google Workspace MCP (Gmail, Calendar
           │                  ├─► arya-device (FastMCP, 127.0.0.1:5002, token auth)
           │                  └─► browser-use service (existing, :8000, kept as is)
           ├─► Local PostgreSQL + pgvector (checkpoints, memory stores, action_log, pii_vault)
-          └─► Langfuse (self-hosted, Docker) + Logfire (infra spans only)
+          └─► Langfuse (self-hosted, Docker)
 ```
 
 Three **separate processes** (core, voice, device) share one repo, one config module and one launcher script. The voice server stays a separate process on purpose: a TTS hang must never block `/chat`. The device server stays separate because pyautogui is blocking and needs the interactive desktop session.
@@ -85,7 +85,7 @@ agent (main, tools = core tools + active skill tools)
 
 ## 5. Reverse PII tokenisation (hard requirement)
 
-Goal: **raw emails and phone numbers never reach a cloud LLM, embedding API, Langfuse, Logfire or TTS provider.** The model works with stable tokens; real values are restored locally only when a tool executes or when text is displayed to the user.
+Goal: **raw emails and phone numbers never reach a cloud LLM, embedding API, Langfuse or TTS provider.** The model works with stable tokens; real values are restored locally only when a tool executes or when text is displayed to the user.
 
 **Token format**: `[EMAIL_xxxxxx]`, `[PHONE_xxxxxx]` where `xxxxxx` = first 6 hex chars of HMAC-SHA256(local secret, normalised value). Deterministic, so the same value always maps to the same token across turns and memory. Normalise before hashing (lowercase email; phone to E.164 with default region IN).
 
@@ -97,7 +97,7 @@ Goal: **raw emails and phone numbers never reach a cloud LLM, embedding API, Lan
 1. User message in `ingest`.
 2. Every tool result before it enters graph state (wrap the tools node once; do not do it per tool). This covers Gmail bodies, Contacts results, WhatsApp OCR text, web results and browser results.
 3. Text written to `episodes`/`knowledge_chunks` and sent for embedding.
-4. Anything sent to Langfuse or Logfire (they only ever see the already-tokenised state; Logfire additionally runs with prompt/message content capture **off**).
+4. Anything sent to Langfuse (it only ever sees already-tokenised state).
 
 **Detokenise (reverse) at these boundaries only**:
 1. Tool-call arguments, immediately before execution (`send_email(to="[EMAIL_3f9a1c]")` → the real address). If a token is unknown, do **not** run the tool; return an error to the model ("unknown token") rather than guessing.
@@ -257,7 +257,7 @@ Because ARYA is personal, every default must be changeable by editing this one f
 ## 11. Observability
 
 - **Langfuse, self-hosted**: use the **official Langfuse docker-compose** from the Langfuse repository in `deploy/langfuse/` (it runs several services; do not hand-write it). Document startup in `docs/RUNBOOK.md`, with ports and the first-run project/key setup. Integrate with LangGraph via the Langfuse callback handler; one trace per `/chat` turn, with `session_id` = thread id and `user_id`. Spans for router, memory reads, agent, each tool, verifier, writes. Record cost and latency.
-- **Logfire**: infrastructure spans only (FastAPI, psycopg, httpx), message content capture off. Make both integrations optional through env flags and failure-safe: if Langfuse is down, the assistant must keep working.
+- Langfuse is optional and failure-safe: if it is down, the assistant must keep working.
 - Everything exported is already tokenised (section 5). Add a test that proves it.
 - Structured JSON logs with a correlation id per turn; log redaction for any key-looking strings.
 
@@ -279,7 +279,7 @@ Provide `python -m evals.run --models gpt-4o,gpt-4o-mini` printing a comparison 
 
 ## 13. Launching and config
 
-- `.env.example` (names only): `OPENAI_API_KEY, GROQ_API_KEY, ELEVENLABS_API_KEY, ELEVENLABS_VOICE_ID, SARVAM_API_KEY, DATABASE_URL, ARYA_USER_ID, PII_HMAC_SECRET, PII_FERNET_KEY, DEVICE_TOKEN, GOOGLE_OAUTH_CLIENT_ID/SECRET, SEARCH_API_KEY, LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY, LANGFUSE_HOST, LOGFIRE_TOKEN, BROWSER_API_URL`.
+- `.env.example` (names only): `OPENAI_API_KEY, GROQ_API_KEY, ELEVENLABS_API_KEY, ELEVENLABS_VOICE_ID, SARVAM_API_KEY, DATABASE_URL, ARYA_USER_ID, PII_HMAC_SECRET, PII_FERNET_KEY, DEVICE_TOKEN, GOOGLE_OAUTH_CLIENT_ID/SECRET, SEARCH_API_KEY, LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY, LANGFUSE_HOST, BROWSER_API_URL`.
 - `deploy/start_all.ps1` starts: Docker services (Langfuse), browser-use API (:8000), arya-device (:5002), arya-voice (:5001), arya-core (:5000), each with health checks and clear failure messages.
 - `/health` of core also reports DB, MCP servers, device server and observability status (degraded is fine, crashed is not).
 
@@ -297,7 +297,7 @@ Provide `python -m evals.run --models gpt-4o,gpt-4o-mini` printing a comparison 
 ## 15. Definition of done
 
 - Unmodified `arya.html` works end to end by voice and by text, including wake word, interrupt, provider/voice toggles, activity sidebar and an approval conversation.
-- No raw email/phone in any request to OpenAI, Groq-bound text, Langfuse, Logfire or TTS providers (tests prove it; STT audio is the documented exception).
+- No raw email/phone in any request to OpenAI, Groq-bound text, Langfuse or TTS providers (tests prove it; STT audio is the documented exception).
 - System prompt plus skill index is small and measured; skills load on demand.
 - All behaviour in section 10 is controlled from `config/policy.yaml`.
 - `docs/RUNBOOK.md` lets a fresh Windows machine reach a working system.

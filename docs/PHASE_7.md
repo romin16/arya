@@ -8,15 +8,11 @@ Implemented migration versions 001 and 002, with checksums recorded in `schema_m
 
 ## B1 — Langfuse
 
-Not implemented or verified. No Langfuse Compose file has been downloaded or added. No trace callback is connected, and PII export behavior has not been tested.
-
-## B2 — Logfire
-
-Not implemented or verified. No instrumentation or capture settings are configured.
+The core now creates one trace scope per `/chat`, propagates the thread and user identifiers, attaches the LangChain callback to graph runs, tokenises callback payloads before export, flushes asynchronously, and logs startup enablement/auth status without keys. Recording-mock tests cover tokenisation and failure safety. A content-free local smoke attempt reached the existing Langfuse v4.71.0 instance and authenticated, but trace ingestion returned HTTP 500. Its web container logs show event upload failing because `127.0.0.1:9090` refuses connections from inside the container. No files under `C:\Users\abc\langfuse` were changed and no second stack was started. Real trace visibility is therefore not verified yet.
 
 ## B3 — Failure safety
 
-Not implemented or verified. Optional-observability failure behavior has not been exercised.
+Langfuse startup and callback failures are handled without failing chat. This is covered by unit tests. The local service was reachable and authenticated, but its trace ingestion path is unhealthy as described above.
 
 ## B4 — Evaluation runner
 
