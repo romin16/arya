@@ -291,7 +291,7 @@ async def test_custom_graph_tokenises_tool_results_logs_actions_and_detokenises_
     assert final_text == f"Sent to {raw_email}."
     assert any("Starting whatsapp_send" in event.get("activity", {}).get("message", "") for event in events)
     assert len(pool.rows) == 1
-    logged_args = pool.rows[0][1][3].obj
+    logged_args = pool.rows[0][1][4].obj
     assert raw_email not in json.dumps(logged_args)
     assert "[EMAIL_" in json.dumps(logged_args)
     assert agent_model.outbound_payloads

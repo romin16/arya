@@ -1,7 +1,17 @@
-# ARYA v4 migration
+# ARYA
 
-This is the new, clean implementation workspace. The user supplied legacy files are read-only source material and are not copied here because several contain embedded credentials. No historical Supabase memory is imported.
+Local-first assistant for Windows. The verified runtime uses Python 3.12, `uv`, and PostgreSQL with pgvector. See [docs/RUNBOOK.md](docs/RUNBOOK.md) for setup and launch instructions, and [docs/PHASE_6.md](docs/PHASE_6.md) for the approval behavior.
 
-Target runtime: Windows 10/11, Python 3.11+, PostgreSQL with pgvector. The current execution environment has Python 3.10 and no project dependencies installed, so dependency-backed phases require setup on a supported runtime before they can be accepted.
+## PostgreSQL integration tests
 
-See `docs/PHASE_1.md` and `docs/OPEN_QUESTIONS.md` for the current phase state and machine-specific prerequisites.
+The graph integration tests run only when `ARYA_TEST_DATABASE_URL` points to a disposable PostgreSQL database. Create an isolated test database, apply the current schema, and then run pytest from PowerShell:
+
+```powershell
+createdb arya_test
+$env:ARYA_TEST_DATABASE_URL = "postgresql://arya:YOUR_LOCAL_PASSWORD@127.0.0.1:5432/arya_test"
+psql "$env:ARYA_TEST_DATABASE_URL" -f db/schema.sql
+uv run --no-sync pytest
+Remove-Item Env:ARYA_TEST_DATABASE_URL
+```
+
+Use a local test database only; never point this variable at a production or personal data database. The test suite mocks network and GUI actions. The former `.phase6_test_runner.py` helper is not present in the repository; use the commands above or your own disposable-database wrapper.

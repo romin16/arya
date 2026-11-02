@@ -985,7 +985,9 @@ async def test_unclear_reasks_rejection_cancels_and_never_calls_tool(monkeypatch
          "no", None, 0),
         ("edit", [ApprovalClassification(decision="edit", edits=[
             ApprovalEdit(call_index=0, field_name="body", new_value="Edited body"),
-        ], unrelated_command=False)], "Change the message to Edited body.", None, 1),
+        ], unrelated_command=False), ApprovalClassification(
+            decision="approve", edits=[], unrelated_command=False,
+        )], "Change the message to Edited body.", None, 1),
         ("unclear", [
             ApprovalClassification(decision="unclear", edits=[], unrelated_command=False),
             ApprovalClassification(decision="reject", edits=[], unrelated_command=False),
@@ -1022,6 +1024,10 @@ async def test_approval_resume_scenarios_allow_followup_on_same_thread(
         if scenario == "yes":
             assert resolved == "The email was sent."
         elif scenario == "edit":
+            assert "Approve these actions?" in resolved
+            assert "Edited body" in resolved
+            assert calls == []
+            resolved, _ = await _turn(runtime, "yes", user_id)
             assert resolved == "The email was sent."
             assert calls[0][1]["body"] == "Edited body"
         elif scenario == "no":
