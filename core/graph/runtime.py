@@ -785,6 +785,9 @@ class CoreGraphRuntime:
         await self.pool.open(wait=True)
         self.saver = AsyncPostgresSaver(self.pool)
         await self.saver.setup()
+        purged_pending = await MemoryRepositories(self.pool).purge_expired_pending_operations()
+        if purged_pending:
+            logger.info("startup_purged_expired_pending_operations count=%d", purged_pending)
         self.embedding_model = OpenAIEmbeddings(
             model=model_settings.get("embedding", "text-embedding-3-small"),
             api_key=api_key,
@@ -924,6 +927,9 @@ class CoreGraphRuntime:
     async def _nightly_memory_consolidation(self, user_id: str):
         try:
             if self.memory is not None:
+                purged_pending = await self.memory.repositories.purge_expired_pending_operations()
+                if purged_pending:
+                    logger.info("nightly_purged_expired_pending_operations count=%d", purged_pending)
                 await self.memory.repositories.consolidate(
                     user_id,
                     inactive_procedure_retention_days=self.memory.inactive_procedure_retention_days,

@@ -446,6 +446,8 @@ def test_required_google_sources_match_installed_server_surface():
 @pytest.mark.asyncio
 @pytest.mark.parametrize("missing_required", [False, True])
 async def test_runtime_start_checks_google_tools_with_mocked_servers(monkeypatch, missing_required):
+    cleanup_calls = []
+
     class StartupPool:
         def __init__(self, **kwargs):
             pass
@@ -462,6 +464,14 @@ async def test_runtime_start_checks_google_tools_with_mocked_servers(monkeypatch
 
         async def setup(self):
             return None
+
+    class StartupRepositories:
+        def __init__(self, pool):
+            self.pool = pool
+
+        async def purge_expired_pending_operations(self):
+            cleanup_calls.append(True)
+            return 0
 
     class StartupModel:
         def __init__(self):
@@ -501,6 +511,7 @@ async def test_runtime_start_checks_google_tools_with_mocked_servers(monkeypatch
     monkeypatch.setattr(runtime_module, "_load_vault", lambda _: PIIVault(b"test-secret", Fernet.generate_key()))
     monkeypatch.setattr(runtime_module, "AsyncConnectionPool", StartupPool)
     monkeypatch.setattr(runtime_module, "AsyncPostgresSaver", StartupSaver)
+    monkeypatch.setattr(runtime_module, "MemoryRepositories", StartupRepositories)
     monkeypatch.setattr(runtime_module, "MultiServerMCPClient", StartupMCPClient)
     startup_model = StartupModel()
     monkeypatch.setattr(runtime_module, "ChatOpenAI", lambda **kwargs: startup_model)
@@ -523,6 +534,7 @@ async def test_runtime_start_checks_google_tools_with_mocked_servers(monkeypatch
         "RouteDecision", "ApprovalClassification", "MemoryWrite",
     }
     assert all(options == {"method": "json_schema", "strict": True} for _, options in startup_model.schemas)
+    assert cleanup_calls == [True]
     await runtime.close()
 
 

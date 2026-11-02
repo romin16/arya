@@ -300,6 +300,11 @@ class MemoryRepositories:
             )
             return await cur.fetchone()
 
+    async def purge_expired_pending_operations(self) -> int:
+        async with self.pool.connection() as conn:
+            cur = await conn.execute("DELETE FROM pending_operations WHERE expires_at<=now()")
+            return cur.rowcount
+
     async def clear_pending_operation(self, user_id: str, thread_id: str, operation_id: int) -> bool:
         async with self.pool.connection() as conn:
             cur = await conn.execute(

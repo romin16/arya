@@ -1044,6 +1044,46 @@ async def test_classifier_failure_preserves_approval_and_next_reply_and_turn_wor
 
 
 @pytest.mark.asyncio
+async def test_expired_pending_operations_are_purged_by_repository_and_nightly_job():
+    database_url = os.environ["ARYA_TEST_DATABASE_URL"]
+    session = f"phase6-pending-purge-{uuid4().hex}"
+    user_id = f"memory-user-{uuid4().hex}"
+    runtime = await _runtime(database_url, writer=ScriptedWriter(), session=session)
+    user_token = runtime.vault.tokenise(user_id)
+    try:
+        expired = await runtime.memory.repositories.set_pending_operation(
+            user_token, session, "tool_approval", {"calls": []}, ttl_seconds=60,
+        )
+        active_thread = session + "-active"
+        await runtime.memory.repositories.set_pending_operation(
+            user_token, active_thread, "tool_approval", {"calls": []}, ttl_seconds=60,
+        )
+        async with runtime.pool.connection() as conn:
+            await conn.execute(
+                "UPDATE pending_operations SET expires_at=now()-interval '1 second' WHERE id=%s",
+                (expired["id"],),
+            )
+        assert await runtime.memory.repositories.purge_expired_pending_operations() == 1
+        assert await runtime.memory.repositories.get_pending_operation(user_token, session) is None
+        assert await runtime.memory.repositories.get_pending_operation(user_token, active_thread) is not None
+
+        nightly_thread = session + "-nightly"
+        nightly = await runtime.memory.repositories.set_pending_operation(
+            user_token, nightly_thread, "tool_approval", {"calls": []}, ttl_seconds=60,
+        )
+        async with runtime.pool.connection() as conn:
+            await conn.execute(
+                "UPDATE pending_operations SET expires_at=now()-interval '1 second' WHERE id=%s",
+                (nightly["id"],),
+            )
+        await runtime._nightly_memory_consolidation(user_token)
+        assert await runtime.memory.repositories.get_pending_operation(user_token, nightly_thread) is None
+        assert await runtime.memory.repositories.get_pending_operation(user_token, active_thread) is not None
+    finally:
+        await runtime.close()
+
+
+@pytest.mark.asyncio
 async def test_expired_approval_is_rejected_without_classification_or_side_effect(monkeypatch):
     database_url = os.environ["ARYA_TEST_DATABASE_URL"]
     session = f"phase6-expired-{uuid4().hex}"
