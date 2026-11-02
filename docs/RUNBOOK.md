@@ -5,7 +5,15 @@
 1. Copy `.env.example` to `.env`. Configure the Postgres URL, OpenAI/Groq/TTS keys, device token, Google OAuth credentials, `GOOGLE_MCP_TOKEN`, and search keys. Keep `.env` private.
 2. Create the project Python 3.12 virtual environment and install the project with its `device` and `dev` extras. Node.js 22.12+ and `uv` are needed for the pinned Google MCP server setup.
 3. In Google Cloud Console, enable Gmail API, Calendar API, and People API. Create an OAuth 2.0 client ID of type **Desktop app**. Put its ID and secret in `GOOGLE_OAUTH_CLIENT_ID` and `GOOGLE_OAUTH_CLIENT_SECRET` in `.env`. Generate a random bearer token for `GOOGLE_MCP_TOKEN`.
-4. Run the one-time local OAuth setup in PowerShell:
+4. Apply database migrations before starting core:
+
+   ```powershell
+   uv run --no-sync python -m db.apply_schema
+   ```
+
+   Migrations are ordered, checksummed, and safe to re-run. Core checks `schema_migrations` at startup and refuses to run against a missing or older schema; run the command again after updating the application.
+
+5. Run the one-time local OAuth setup in PowerShell:
 
    ```powershell
    .\scripts\setup_google_mcp.ps1 -Account you@example.com
@@ -13,7 +21,7 @@
 
    The script checks out the pinned `google-accounts-mcp` commit under `%LOCALAPPDATA%\Arya`, applies the loopback bind patch, syncs its locked dependencies, and stores data under `%LOCALAPPDATA%\Arya\google-mcp-data`. It checks `tokens.db` for the requested account and skips OAuth if that account is already authorized. Otherwise it opens Google's consent page. Sign in and grant access.
 
-5. Start the four local processes:
+6. Start the four local processes:
 
    ```powershell
    .\deploy\start_all.ps1

@@ -54,6 +54,7 @@ from core.skills_runtime import SkillsRuntime
 from core.tools.native import build_native_tools
 from core.tools.search import SearchService
 from core.tools.weather import WeatherService
+from db.schema_version import ensure_schema_current
 
 ROOT = Path(__file__).resolve().parents[2]
 DEVICE_MCP_URL = "http://127.0.0.1:5002/mcp/"
@@ -792,6 +793,12 @@ class CoreGraphRuntime:
             kwargs={"autocommit": True, "prepare_threshold": 0, "row_factory": dict_row},
         )
         await self.pool.open(wait=True)
+        try:
+            await ensure_schema_current(self.pool)
+        except Exception:
+            await self.pool.close()
+            self.pool = None
+            raise
         self.saver = AsyncPostgresSaver(self.pool)
         await self.saver.setup()
         purged_pending = await MemoryRepositories(self.pool).purge_expired_pending_operations()

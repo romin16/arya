@@ -1,6 +1,10 @@
 # Phase 7 — Observability, evaluations, and cutover
 
-Status: **not started**. Part A of the current follow-up was completed separately in commits `26ef8d3` (edit reconfirmation), `ee4f4a2` (approval audit), `a57ae92` (expired-operation cleanup), and `12981fa` (routing). Its integration coverage passes against disposable Postgres. Phase 7 work B1–B6 has not begun.
+Status: **in progress**. Part A of the current follow-up was completed separately in commits `26ef8d3` (edit reconfirmation), `ee4f4a2` (approval audit), `a57ae92` (expired-operation cleanup), and `12981fa` (routing). This continuation adds versioned database migrations and a core startup version guard. Migration verification against a disposable local Postgres includes upgrading the Phase 1 schema. The migrations have not yet been applied to the user's `arya` database.
+
+## Database migration prerequisite
+
+Implemented migration versions 001 and 002, with checksums recorded in `schema_migrations`. `uv run --no-sync python -m db.apply_schema` applies pending migrations and is safe to re-run. Core refuses to start when migration metadata is missing, behind, or newer than the code. The integration test builds a Phase 1 database, upgrades it, verifies preserved data and new schema objects, and runs the migration a second time. Full suite: 134 passed against a disposable Postgres; Ruff passed. The real `arya` database application remains pending.
 
 ## B1 — Langfuse
 

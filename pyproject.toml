@@ -30,7 +30,7 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["core*", "device*", "voice*", "evals*"]
+include = ["core*", "device*", "voice*", "evals*", "db*"]
 
 [project.optional-dependencies]
 voice = ["elevenlabs==1.58.1", "sarvamai==0.1.11", "groq==0.26.0"]

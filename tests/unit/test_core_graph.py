@@ -447,6 +447,7 @@ def test_required_google_sources_match_installed_server_surface():
 @pytest.mark.parametrize("missing_required", [False, True])
 async def test_runtime_start_checks_google_tools_with_mocked_servers(monkeypatch, missing_required):
     cleanup_calls = []
+    schema_checks = []
 
     class StartupPool:
         def __init__(self, **kwargs):
@@ -511,6 +512,11 @@ async def test_runtime_start_checks_google_tools_with_mocked_servers(monkeypatch
     monkeypatch.setattr(runtime_module, "_load_vault", lambda _: PIIVault(b"test-secret", Fernet.generate_key()))
     monkeypatch.setattr(runtime_module, "AsyncConnectionPool", StartupPool)
     monkeypatch.setattr(runtime_module, "AsyncPostgresSaver", StartupSaver)
+
+    async def schema_is_current(pool):
+        schema_checks.append(True)
+
+    monkeypatch.setattr(runtime_module, "ensure_schema_current", schema_is_current)
     monkeypatch.setattr(runtime_module, "MemoryRepositories", StartupRepositories)
     monkeypatch.setattr(runtime_module, "MultiServerMCPClient", StartupMCPClient)
     startup_model = StartupModel()
@@ -535,6 +541,7 @@ async def test_runtime_start_checks_google_tools_with_mocked_servers(monkeypatch
     }
     assert all(options == {"method": "json_schema", "strict": True} for _, options in startup_model.schemas)
     assert cleanup_calls == [True]
+    assert schema_checks == [True]
     await runtime.close()
 
 

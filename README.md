@@ -8,10 +8,11 @@ The graph integration tests run only when `ARYA_TEST_DATABASE_URL` points to a d
 
 ```powershell
 createdb arya_test
-$env:ARYA_TEST_DATABASE_URL = "postgresql://arya:YOUR_LOCAL_PASSWORD@127.0.0.1:5432/arya_test"
-psql "$env:ARYA_TEST_DATABASE_URL" -f db/schema.sql
+$env:DATABASE_URL = "postgresql://arya:YOUR_LOCAL_PASSWORD@127.0.0.1:5432/arya_test"
+uv run --no-sync python -m db.apply_schema
+$env:ARYA_TEST_DATABASE_URL = $env:DATABASE_URL
 uv run --no-sync pytest
-Remove-Item Env:ARYA_TEST_DATABASE_URL
+Remove-Item Env:ARYA_TEST_DATABASE_URL,Env:DATABASE_URL
 ```
 
 Use a local test database only; never point this variable at a production or personal data database. The test suite mocks network and GUI actions. The former `.phase6_test_runner.py` helper is not present in the repository; use the commands above or your own disposable-database wrapper.
