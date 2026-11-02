@@ -42,6 +42,16 @@ def test_taint_escalates_only_auto_side_effects():
     assert policy.mode_for("calculator", {"expression": "2+2"}, tainted=True) == "auto"
 
 
+def test_approval_edit_reconfirmation_defaults_on_and_is_configurable():
+    default = ToolPolicy({"tools": {"*": {"mode": "ask"}}}, {"gmail_send"})
+    disabled = ToolPolicy({
+        "approval": {"edit_requires_reconfirm": False},
+        "tools": {"*": {"mode": "ask"}},
+    }, {"gmail_send"})
+    assert default.edit_requires_reconfirm is True
+    assert disabled.edit_requires_reconfirm is False
+
+
 def test_live_approval_eval_cases_match_configured_policy():
     root = Path(__file__).resolve().parents[2]
     cases = yaml.safe_load((root / "evals/datasets/approvals.yaml").read_text(encoding="utf-8"))

@@ -17,6 +17,10 @@ class ToolPolicy:
         self.registered_tools = set(registered_tools)
         self.injection_taint_escalation = bool(config.get("injection_taint_escalation", True))
         self.approval_timeout_seconds = max(1, int(config.get("approval_timeout_seconds", 120)))
+        approval = config.get("approval", {})
+        if not isinstance(approval, dict):
+            raise ValueError("config/policy.yaml approval must be a mapping")
+        self.edit_requires_reconfirm = bool(approval.get("edit_requires_reconfirm", True))
         for pattern, entry in entries.items():
             mode = entry.get("mode") if isinstance(entry, dict) else entry
             if mode not in {"auto", "ask", "block"}:

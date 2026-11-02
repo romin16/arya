@@ -841,22 +841,36 @@ async def test_approval_edits_change_executed_arguments(monkeypatch):
     session = f"phase6-edit-{uuid4().hex}"
     user_id = f"memory-user-{uuid4().hex}"
     old_email = f"old-{uuid4().hex[:8]}@arya.dev"
-    new_email = f"new-{uuid4().hex[:8]}@arya.dev"
     runtime, calls, vault, _ = await _approval_harness(
         monkeypatch, database_url, session, user_id, old_email,
-        [ApprovalClassification(decision="edit", edits=[
-            ApprovalEdit(call_index=0, field_name="to", new_value=[new_email]),
-            ApprovalEdit(call_index=0, field_name="body", new_value="Updated"),
-        ], unrelated_command=False)],
+        [
+            ApprovalClassification(decision="edit", edits=[
+                ApprovalEdit(call_index=0, field_name="body", new_value="edited approval text"),
+            ], unrelated_command=False),
+            ApprovalClassification(decision="approve", edits=[], unrelated_command=False),
+        ],
     )
     try:
         question, _ = await _turn(runtime, "Send an email to myself saying hi.", user_id)
         assert old_email in question
-        reply, _ = await _turn(runtime, f"Change it to {new_email} and say Updated.", user_id)
+        edited_question, _ = await _turn(
+            runtime, "Change the email body to edited approval text.", user_id,
+        )
+        assert old_email in edited_question
+        assert "edited approval text" in edited_question
+        assert "Approve these actions?" in edited_question
+        assert calls == []
+        user_token = vault.tokenise(user_id)
+        pending = await runtime.memory.repositories.get_pending_operation(user_token, session)
+        assert pending is not None
+        assert "edited approval text" in pending["payload"]["calls"][0]["args"]["body"]
+
+        reply, _ = await _turn(runtime, "yes", user_id)
         assert reply == "The email was sent."
         assert len(calls) == 1 and calls[0][0] == "send_email"
-        assert calls[0][1]["to"] == [new_email]
-        assert calls[0][1]["subject"] == "Hello" and calls[0][1]["body"] == "Updated"
+        assert calls[0][1]["to"] == [old_email]
+        assert calls[0][1]["subject"] == "Hello"
+        assert calls[0][1]["body"] == "edited approval text"
     finally:
         await runtime.close()
 

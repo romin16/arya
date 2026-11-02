@@ -472,6 +472,29 @@ def _validate_tool_arguments(tool: Any, arguments: dict[str, Any]) -> dict[str, 
     raise ValueError("The tool has no schema to validate edited arguments")
 
 
+def _apply_pending_approval_edits(
+    payload: dict[str, Any], edits: list[dict[str, Any]], tools: dict[str, Any], vault: PIIVault,
+) -> tuple[dict[str, Any], str]:
+    calls = [dict(call) for call in payload.get("calls", [])]
+    if not edits or not calls:
+        raise ValueError("No pending action edits were supplied")
+    for index, changes in enumerate(edits):
+        if not isinstance(changes, dict) or not changes:
+            continue
+        if index >= len(calls):
+            raise ValueError("An edit refers to an unknown approval action")
+        call = calls[index]
+        tool = tools.get(call.get("name"))
+        if tool is None:
+            raise ValueError("The pending tool is no longer registered")
+        safe_args = dict(call.get("args", {}))
+        safe_args.update(_tokenise_result(changes, vault))
+        call["args"] = _validate_tool_arguments(tool, safe_args)
+    question = _approval_question(calls, vault)
+    updated = {**payload, "calls": calls, "question": vault.tokenise(question)}
+    return updated, question
+
+
 def _verified_tool_names(messages: list[Any]) -> set[str]:
     results = {
         message.tool_call_id: message
@@ -1335,6 +1358,19 @@ class CoreGraphRuntime:
             pending_forget = state.get("pending_forget")
             timeout = float(self.limits.get("tool_timeout_seconds", 30))
             tool_calls = [dict(call) for call in assistant.tool_calls]
+            approval_resuming = bool(state.get("approval_resuming"))
+            if approval_resuming and self.memory is not None:
+                pending = await self.memory.repositories.get_pending_operation(
+                    state["user_id"], state["thread_id"],
+                )
+                if pending and pending.get("operation_type") == "tool_approval":
+                    approved_by_id = {
+                        item.get("id"): item.get("args", {})
+                        for item in pending.get("payload", {}).get("calls", [])
+                    }
+                    for call in tool_calls:
+                        if call.get("id") in approved_by_id:
+                            call["args"] = approved_by_id[call["id"]]
             approval_calls = [
                 call for call in tool_calls
                 if call["name"] not in {"load_skill", "memory_search", "memory_forget"}
@@ -1345,7 +1381,6 @@ class CoreGraphRuntime:
             approval_decision: dict[str, Any] | None = None
             approved_args: dict[str, dict[str, Any]] = {}
             approval_failed_message = None
-            approval_resuming = bool(state.get("approval_resuming"))
             if approval_calls:
                 if self.policy is None or self.memory is None:
                     approval_failed_message = "Approval is not set up yet. Nothing was changed."
@@ -1354,7 +1389,7 @@ class CoreGraphRuntime:
                     if not approval_resuming:
                         safe_calls = [
                             {"name": call["name"], "args": call["args"], "id": call["id"]}
-                            for call in tool_calls
+                            for call in approval_calls
                         ]
                         await self.memory.repositories.set_pending_operation(
                             state["user_id"], state["thread_id"], "tool_approval",
@@ -1860,6 +1895,32 @@ class CoreGraphRuntime:
                     )
                     yield {"chunk": "I couldn't understand your reply, please say yes or no."}
                     return
+            if (
+                classification.decision == "edit"
+                and not classification.unrelated_command
+                and self.policy is not None
+                and self.policy.edit_requires_reconfirm
+            ):
+                try:
+                    updated_payload, updated_question = _apply_pending_approval_edits(
+                        pending_operation["payload"],
+                        resume_value.get("edited_args", []),
+                        {**self.tools, **self.device_tools},
+                        self.vault,
+                    )
+                    updated = await repositories.update_pending_operation_payload(
+                        user_id, session_id, int(pending_operation["id"]), updated_payload,
+                    )
+                except Exception:
+                    logger.exception("Could not apply approval edit; pending action retained")
+                    yield {"chunk": "I couldn't apply those edits safely. Nothing was changed. Please try a different edit."}
+                    return
+                if not updated:
+                    yield {"chunk": "That approval expired. Nothing was changed."}
+                    return
+                yield {"activity": {"event": "Approval", "message": "Updated action awaits confirmation"}}
+                yield {"chunk": updated_question}
+                return
             if classification.decision == "unclear":
                 yield {"activity": {"event": "Approval", "message": "Approval is still pending"}}
                 original_question = self.vault.detokenise(str(pending_operation["payload"].get("question", "")))

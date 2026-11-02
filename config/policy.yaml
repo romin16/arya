@@ -1,5 +1,7 @@
 injection_taint_escalation: true
 approval_timeout_seconds: 120
+approval:
+  edit_requires_reconfirm: true
 tools:
   "*": {mode: auto}
   "*search*": {mode: auto}

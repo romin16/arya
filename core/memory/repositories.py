@@ -308,6 +308,17 @@ class MemoryRepositories:
             )
             return cur.rowcount == 1
 
+    async def update_pending_operation_payload(
+        self, user_id: str, thread_id: str, operation_id: int, payload: dict[str, Any],
+    ) -> bool:
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                """UPDATE pending_operations SET payload=%s
+                   WHERE user_id=%s AND thread_id=%s AND id=%s AND expires_at>now()""",
+                (Jsonb(payload), user_id, thread_id, operation_id),
+            )
+            return cur.rowcount == 1
+
     async def delete_candidates(self, user_id: str, candidates: list[dict[str, Any]], *, suppression_days: int = 90) -> dict[str, Any]:
         allowed = {"entities", "procedures", "patterns", "episodes"}
         deleted_items: list[dict[str, Any]] = []
