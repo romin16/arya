@@ -663,6 +663,15 @@ async def test_graph_approval_restores_self_recipient_and_executes_only_after_co
         assert pending and pending["operation_type"] == "tool_approval"
         assert recipient not in json.dumps(pending["payload"])
         assert token in json.dumps(pending["payload"])
+        async with runtime.pool.connection() as conn:
+            request_audit = await (await conn.execute(
+                "SELECT status,approved_by,approved_at,approval_channel,tool_call_id "
+                "FROM action_log WHERE thread_id=%s AND tool='gmail_send'",
+                (session,),
+            )).fetchone()
+        assert request_audit["status"] == "awaiting_approval"
+        assert request_audit["approved_by"] is None and request_audit["approved_at"] is None
+        assert request_audit["approval_channel"] is None and request_audit["tool_call_id"]
 
         reply, _ = await _turn(runtime, "yes", user_id)
         assert reply == "The email was sent."
@@ -670,6 +679,16 @@ async def test_graph_approval_restores_self_recipient_and_executes_only_after_co
         assert calls[0][1]["to"] == [recipient]
         assert calls[0][1]["subject"] == "Hello" and calls[0][1]["body"] == "hi"
         assert await runtime.memory.repositories.get_pending_operation(user_token, session) is None
+        async with runtime.pool.connection() as conn:
+            completed_audit = await (await conn.execute(
+                "SELECT status,approved_by,approved_at,approval_channel FROM action_log "
+                "WHERE thread_id=%s AND tool='gmail_send'",
+                (session,),
+            )).fetchone()
+        assert completed_audit["status"] == "succeeded"
+        assert completed_audit["approved_by"] == user_token
+        assert completed_audit["approved_at"] is not None
+        assert completed_audit["approval_channel"] == "chat"
     finally:
         await runtime.close()
 
@@ -919,6 +938,13 @@ async def test_unclear_reasks_rejection_cancels_and_never_calls_tool(monkeypatch
         assert "Approval was rejected" in rejected
         assert calls == []
         assert await runtime.memory.repositories.get_pending_operation(vault.tokenise(user_id), session) is None
+        async with runtime.pool.connection() as conn:
+            audit = await (await conn.execute(
+                "SELECT status,approved_by,approved_at FROM action_log WHERE thread_id=%s AND tool='gmail_send'",
+                (session,),
+            )).fetchone()
+        assert audit["status"] == "rejected"
+        assert audit["approved_by"] is None and audit["approved_at"] is None
     finally:
         await runtime.close()
 
@@ -1037,6 +1063,13 @@ async def test_expired_approval_is_rejected_without_classification_or_side_effec
         assert "expired" in reply.casefold()
         assert calls == []
         assert await runtime.memory.repositories.get_pending_operation(vault.tokenise(user_id), session) is None
+        async with runtime.pool.connection() as conn:
+            audit = await (await conn.execute(
+                "SELECT status,approved_by,approved_at FROM action_log WHERE thread_id=%s AND tool='gmail_send'",
+                (session,),
+            )).fetchone()
+        assert audit["status"] == "expired"
+        assert audit["approved_by"] is None and audit["approved_at"] is None
     finally:
         await runtime.close()
 
@@ -1065,6 +1098,16 @@ async def test_multiple_approval_tools_are_bundled_into_one_interrupt_and_post_a
         assert calls[0][0] == calls[1][0] == "send_email"
         assert all(item[1]["to"] == [recipient] and item[1]["body"] == "hi" for item in calls)
         assert calls[1][1]["reply_to_message_id"] == "mock-thread"
+        async with runtime.pool.connection() as conn:
+            audit = await (await conn.execute(
+                "SELECT count(*) AS count,min(status) AS status,min(approved_by) AS approved_by,"
+                "min(approval_channel) AS channel,min(approved_at) AS approved_at "
+                "FROM action_log WHERE thread_id=%s AND tool_call_id IS NOT NULL",
+                (session,),
+            )).fetchone()
+        assert audit["count"] == 2
+        assert audit["status"] == "succeeded" and audit["approved_by"] == vault.tokenise(user_id)
+        assert audit["channel"] == "post" and audit["approved_at"] is not None
     finally:
         app.state.runtime = None
         await runtime.close()

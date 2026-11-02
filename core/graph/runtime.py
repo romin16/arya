@@ -32,7 +32,12 @@ from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 from pydantic import BaseModel, ConfigDict, Field
 
-from core.graph.action_logger import latest_action_entries, persist_action_entries
+from core.graph.action_logger import (
+    latest_action_entries,
+    persist_action_entries,
+    persist_approval_requests,
+    update_approval_entries,
+)
 from core.memory.normalization import explicit_user_rules
 from core.memory.repositories import MemoryRepositories
 from core.memory.service import MemoryService
@@ -196,6 +201,8 @@ class ARYAState(MessagesState, total=False):
     procedural_tool_feedback: bool
     tool_rounds: int
     approval_resuming: bool
+    approval_actor: str
+    approval_channel: str
     system_prompt: str
     token_used: int
     token_limit_reached: bool
@@ -516,7 +523,9 @@ def _verified_tool_names(messages: list[Any]) -> set[str]:
             if isinstance(parsed, dict):
                 if parsed.get("success") is False:
                     continue
-                if parsed.get("outcome") in {"failed", "no_op"}:
+                if parsed.get("outcome") in {
+                    "failed", "no_op", "rejected", "expired", "awaiting_approval", "approved",
+                }:
                     continue
             successful.add(str(call.get("name", "")))
     return successful
@@ -1391,6 +1400,12 @@ class CoreGraphRuntime:
                             {"name": call["name"], "args": call["args"], "id": call["id"]}
                             for call in approval_calls
                         ]
+                        await persist_approval_requests(
+                            self.pool,
+                            user_id=state["user_id"],
+                            thread_id=state["thread_id"],
+                            calls=safe_calls,
+                        )
                         await self.memory.repositories.set_pending_operation(
                             state["user_id"], state["thread_id"], "tool_approval",
                             {"calls": safe_calls, "question": self.vault.tokenise(question)},
@@ -1408,6 +1423,23 @@ class CoreGraphRuntime:
                         approval_decision = {"decision": "reject"}
                         approval_failed_message = "The pending approval could not be verified. Nothing was changed."
                     else:
+                        decision = approval_decision.get("decision")
+                        if decision in {"approve", "edit"}:
+                            await update_approval_entries(
+                                self.pool,
+                                thread_id=state["thread_id"],
+                                calls=pending["payload"].get("calls", []),
+                                status="approved",
+                                approved_by=str(state.get("approval_actor") or state["user_id"]),
+                                approval_channel=str(state.get("approval_channel") or "chat"),
+                            )
+                        elif decision in {"expired", "reject"}:
+                            await update_approval_entries(
+                                self.pool,
+                                thread_id=state["thread_id"],
+                                calls=pending["payload"].get("calls", []),
+                                status="rejected" if decision == "reject" else decision,
+                            )
                         await self.memory.repositories.clear_pending_operation(
                             state["user_id"], state["thread_id"], int(pending["id"]),
                         )
@@ -1471,6 +1503,7 @@ class CoreGraphRuntime:
                             if not _has_explicit_memory_forget_intent(latest_user_text):
                                 content = _tool_content({
                                     "success": False,
+                                    "outcome": "rejected",
                                     "error": (
                                         "memory_forget requires an explicit request to forget, delete, remove, clear, "
                                         "or erase a stored memory. No search or change was performed."
@@ -1504,7 +1537,10 @@ class CoreGraphRuntime:
                         blocked = hard_rule_for(name, safe_args, state.get("procedures", []))
                         if blocked is not None:
                             refusal_message = f"Blocked by a standing rule: {blocked.get('rule_text', 'hard rule')}. Nothing was changed."
-                            result = {"success": False, "policy_blocked": True, "message": refusal_message}
+                            result = {
+                                "success": False, "outcome": "rejected",
+                                "policy_blocked": True, "message": refusal_message,
+                            }
                             content = _tool_content(result, self.vault)
                             status = "success"
                             results.append(ToolMessage(content=content, name=name, tool_call_id=call["id"], status=status))
@@ -1524,8 +1560,13 @@ class CoreGraphRuntime:
                             policy_refusal = f"Approval is not set up yet for {name}. Nothing was changed."
                         if policy_refusal:
                             refusal_message = policy_refusal
+                            refusal_outcome = (
+                                "expired" if approval_decision and approval_decision.get("decision") == "expired"
+                                else "rejected"
+                            )
                             result = {
                                 "success": False,
+                                "outcome": refusal_outcome,
                                 "approval_required": mode == "ask",
                                 "policy_blocked": mode == "block",
                                 "message": refusal_message,
@@ -1931,7 +1972,11 @@ class CoreGraphRuntime:
                 # Resolve the old interrupt as rejected, then run this unrelated message normally.
                 try:
                     async for _ in self.graph.astream(
-                        Command(update={"approval_resuming": True}, resume={"decision": "reject"}),
+                        Command(update={
+                            "approval_resuming": True,
+                            "approval_actor": user_id,
+                            "approval_channel": "chat",
+                        }, resume={"decision": "reject"}),
                         config=config, stream_mode="custom",
                     ):
                         pass
@@ -1944,6 +1989,8 @@ class CoreGraphRuntime:
                 approval_input = Command(
                     update={
                         "approval_resuming": True,
+                        "approval_actor": user_id,
+                        "approval_channel": "chat",
                     },
                     resume=resume_value,
                 )
@@ -1972,6 +2019,23 @@ class CoreGraphRuntime:
         elif decision == "edit":
             if edited_args is None:
                 return {"accepted": False, "detail": "Edited arguments are required for an edit decision."}
+            if self.policy is not None and self.policy.edit_requires_reconfirm:
+                try:
+                    updated_payload, question = _apply_pending_approval_edits(
+                        pending["payload"], edited_args, {**self.tools, **self.device_tools}, self.vault,
+                    )
+                    updated = await self.memory.repositories.update_pending_operation_payload(
+                        user_id, thread_id, int(pending["id"]), updated_payload,
+                    )
+                except Exception:
+                    logger.exception("Could not apply POST /approve edit; pending action retained")
+                    return {"accepted": False, "detail": "Could not apply edits safely. Nothing was changed."}
+                if not updated:
+                    return {"accepted": False, "detail": "That approval expired. Nothing was changed."}
+                return {
+                    "accepted": True,
+                    "detail": f"Updated action awaits confirmation:\n{question}",
+                }
             resume_value = {"decision": "edit", "edited_args": edited_args}
         else:
             resume_value = {"decision": decision}
@@ -1979,7 +2043,11 @@ class CoreGraphRuntime:
         config = {"configurable": {"thread_id": thread_id}}
         try:
             async for event in self.graph.astream(
-                Command(update={"approval_resuming": True}, resume=resume_value),
+                Command(update={
+                    "approval_resuming": True,
+                    "approval_actor": user_id,
+                    "approval_channel": "post",
+                }, resume=resume_value),
                 config=config, stream_mode="custom",
             ):
                 if isinstance(event, dict) and event.get("kind") == "token":

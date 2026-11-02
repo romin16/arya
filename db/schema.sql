@@ -110,5 +110,10 @@ CREATE INDEX IF NOT EXISTS pending_operations_expiry ON pending_operations(expir
 CREATE TABLE IF NOT EXISTS action_log (
  id bigserial PRIMARY KEY,user_id text NOT NULL,thread_id text,ts timestamptz DEFAULT now(),tool text,
  args jsonb,status text,result_summary text,approved_by text,duration_ms int);
+ALTER TABLE action_log ADD COLUMN IF NOT EXISTS tool_call_id text;
+ALTER TABLE action_log ADD COLUMN IF NOT EXISTS approved_at timestamptz;
+ALTER TABLE action_log ADD COLUMN IF NOT EXISTS approval_channel text;
+CREATE UNIQUE INDEX IF NOT EXISTS action_log_thread_tool_call_id
+ ON action_log(thread_id,tool_call_id) WHERE tool_call_id IS NOT NULL;
 CREATE TABLE IF NOT EXISTS pii_vault (
  token text PRIMARY KEY,kind text NOT NULL,value_enc bytea NOT NULL,created_at timestamptz DEFAULT now());
