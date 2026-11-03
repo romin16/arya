@@ -26,16 +26,19 @@ Get-NetTCPConnection -LocalPort 5000,5001,5002,8321 -State Listen -ErrorAction S
 - Phase 5 five-store memory (entities versioned, episodes, knowledge, procedures with code-enforced tool/argument constraints, patterns with N-observations rule), router, background writer, `memory_forget` with thread-bound confirmation, soft delete + tombstones. Verified live.
 - Phase 6 policy gate (`config/policy.yaml`), approvals via `interrupt()`, verifier, injection taint, caps. Verified live: approval question shows the real recipient/content, yes sends, no cancels, edit re-asks (`approval.edit_requires_reconfirm`), audit rows (`awaiting_approval`, `succeeded`, `approved_by`, `approved_at`, `approval_channel`), `pending_operations` cleaned up.
 
-Most recent local test status: 113 unit tests and 33 temporary-Postgres integration tests pass; Ruff is clean. The all-suite OpenAI comparison passes all listed suites for `gpt-4o-mini`; `gpt-4o` has two memory-routing misses. See sections 3 and 4.
+Most recent local test status after the schema-drift repair: 121 unit tests and 35 temporary-Postgres integration tests pass; Ruff is clean. The all-suite OpenAI comparison passes all listed suites for `gpt-4o-mini`; `gpt-4o` has two memory-routing misses. See sections 3 and 4.
 
 ## 3. Phase 7 status
 
 - Langfuse callback integration and PII-safe recording tests are implemented. The user confirmed traces appear in the existing local Langfuse instance. Do not touch `C:\Users\abc\langfuse` or start another stack. Compose scripts pass the external directory and env file explicitly and reject an in-repository directory.
-- Versioned migrations 001 and 002, `schema_migrations`, idempotent application, and the core schema-version guard are implemented. Disposable-Postgres tests upgrade a Phase 1 schema. The authorized real-database apply reported no pending migrations and schema version 2; no migrations or row transformations were needed in that run.
-- Outgoing email, WhatsApp, and calendar text is isolated from recalled memory; graph integration coverage and a live approval eval case are present.
+- Versioned migrations 001–003, `schema_migrations`, post-migration object verification, and the core schema/read-query startup guard are implemented. Migration 003 adds/backfills `knowledge_chunks.title`; the authorized apply completed on the real database at version 3. The last catalog diff had no missing code-referenced columns.
+- Outgoing email, WhatsApp, and calendar text is isolated from recalled memory. The memory writer receives user-authored messages only, and entities require an explicit matching first-person fact. Read-only contact lookups cannot store returned contact data.
+- Langfuse retries authentication in the background with backoff and logs once after reconnecting. The user confirmed traces appear in the existing instance.
+- Runtime streamed replies replace banned persona phrases, including “Enjoy”; a lofi tone eval case and split-chunk regression test cover it.
+- Google MCP setup applies the supported `serve(..., host=MCP_HOST)` patch; the launcher sets `MCP_HOST=127.0.0.1`. The installed server source is patched, but was not launched during this change.
 - All-suite eval runner, SSE replay, full-extras sync launcher, runbook, and migration map are implemented. See `docs/PHASE_7.md` for exact live eval results and the two remaining gpt-4o routing misses.
 - The STT hallucination filter is config-driven and tested. No `_run_migration_tests.py` helper was present when checked.
-- Last numbered-step checks: 113 unit tests passed, 33 temporary-Postgres integration tests passed, Ruff clean. The only warning is LangGraph's pending serializer-default deprecation.
+- Last checks: 121 unit tests passed, 35 temporary-Postgres integration tests passed, Ruff clean. The only warning is LangGraph's pending serializer-default deprecation.
 
 ## 4. Remaining work
 
