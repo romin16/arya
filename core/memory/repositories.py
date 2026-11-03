@@ -150,8 +150,8 @@ class MemoryRepositories:
             )
             doc_id = (await cur.fetchone())["id"]
             cur = await conn.execute(
-                "INSERT INTO knowledge_chunks(user_id,doc_id,chunk_idx,text,embedding,metadata) VALUES(%s,%s,%s,%s,%s::vector,%s) RETURNING id",
-                (user_id, doc_id, chunk_idx, text, _vector(embedding), Jsonb(metadata or {})),
+                "INSERT INTO knowledge_chunks(user_id,doc_id,chunk_idx,title,text,embedding,metadata) VALUES(%s,%s,%s,%s,%s,%s::vector,%s) RETURNING id",
+                (user_id, doc_id, chunk_idx, title, text, _vector(embedding), Jsonb(metadata or {})),
             )
             return (await cur.fetchone())["id"]
 

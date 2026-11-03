@@ -7,8 +7,12 @@ from uuid import uuid4
 import psycopg
 import pytest
 from psycopg import sql
+from psycopg.conninfo import make_conninfo
+from psycopg.rows import dict_row
+from psycopg_pool import AsyncConnectionPool
 
 from db.apply_schema import MIGRATIONS, apply_migrations
+from core.memory.repositories import MemoryRepositories
 
 ROOT = Path(__file__).resolve().parents[2]
 pytestmark = pytest.mark.skipif(
@@ -42,15 +46,18 @@ def test_phase1_schema_upgrades_without_losing_rows_and_is_repeatable():
             )
             connection.commit()
 
-            assert apply_migrations(connection, MIGRATIONS) == [2]
+            assert apply_migrations(connection, MIGRATIONS) == [2, 3]
             assert apply_migrations(connection, MIGRATIONS) == []
-            assert connection.execute("SELECT max(version) FROM schema_migrations").fetchone()[0] == 2
+            assert connection.execute("SELECT max(version) FROM schema_migrations").fetchone()[0] == 3
             assert connection.execute(
                 "SELECT value FROM entities WHERE user_id='migration-test' AND key='employer'"
             ).fetchone()[0] == "ARYA Labs"
             assert connection.execute(
                 "SELECT user_id,text FROM knowledge_chunks WHERE doc_id=%s", (doc_id,),
             ).fetchone() == ("migration-test", "Existing chunk")
+            assert connection.execute(
+                "SELECT title FROM knowledge_chunks WHERE doc_id=%s", (doc_id,),
+            ).fetchone()[0] == "Existing doc"
             assert connection.execute(
                 "SELECT confidence,argument_constraints,inactive_at FROM procedures LIMIT 0"
             ).description
@@ -70,4 +77,65 @@ def test_phase1_schema_upgrades_without_losing_rows_and_is_repeatable():
             }
             assert {"tool_call_id", "approved_at", "approval_channel"} <= action_columns
         finally:
+            connection.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema)))
+
+
+@pytest.mark.asyncio
+async def test_phase1_schema_runs_all_memory_store_read_and_write_paths():
+    database_url = os.environ["ARYA_TEST_DATABASE_URL"]
+    schema = "memory_upgrade_" + uuid4().hex[:12]
+    with psycopg.connect(database_url) as connection:
+        connection.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
+        connection.execute(sql.SQL("SET search_path TO {}, public").format(sql.Identifier(schema)))
+        connection.commit()
+        try:
+            assert apply_migrations(connection, MIGRATIONS, target_version=1) == [1]
+            doc_id = connection.execute(
+                "INSERT INTO knowledge_docs(user_id,title,source) VALUES('u','Prior title','test') RETURNING id"
+            ).fetchone()[0]
+            connection.execute(
+                "INSERT INTO knowledge_chunks(doc_id,chunk_idx,text) VALUES(%s,0,'prior text')", (doc_id,),
+            )
+            connection.commit()
+            assert apply_migrations(connection, MIGRATIONS) == [2, 3]
+        finally:
+            connection.commit()
+
+    conninfo = make_conninfo(database_url, options=f"-c search_path={schema},public")
+    pool = AsyncConnectionPool(
+        conninfo=conninfo, min_size=1, max_size=1, open=False,
+        kwargs={"autocommit": True, "row_factory": dict_row},
+    )
+    await pool.open(wait=True)
+    try:
+        repo = MemoryRepositories(pool)
+        vector = [0.0] * 1536
+        await repo.upsert_entity("u", "employer", "ARYA Labs")
+        assert (await repo.current_entities("u"))[0]["value"] == "ARYA Labs"
+
+        episode_id = await repo.add_episode("u", "thread", "Quarterly plan", "Plan for Q4", vector)
+        assert episode_id is not None
+        assert await repo.search_episodes("u", "quarterly plan", vector)
+
+        knowledge_id = await repo.add_knowledge_chunk(
+            "u", "New title", "test", "Knowledge body", vector,
+        )
+        knowledge = await repo.search_knowledge("u", "knowledge body", vector)
+        assert knowledge and knowledge[0]["id"] == knowledge_id
+        assert knowledge[0]["title"] == "New title"
+
+        await repo.add_procedure(
+            "u", "Never message Aditya on WhatsApp", tool_pattern="whatsapp_send",
+            argument_constraints=[{"argument": "contact", "value": "Aditya"}],
+        )
+        assert (await repo.active_procedures("u"))[0]["tool_pattern"] == "whatsapp_send"
+
+        observation = await repo.record_pattern_observation("u", "market-worry", "Market worry")
+        assert observation["observations"] == 1
+        pattern_id = await repo.add_pattern("u", "Market worry", vector, confidence=0.7)
+        patterns = await repo.search_patterns("u", "market worry", vector)
+        assert pattern_id is not None and patterns and patterns[0]["id"] == pattern_id
+    finally:
+        await pool.close()
+        with psycopg.connect(database_url) as connection:
             connection.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema)))

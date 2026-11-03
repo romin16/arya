@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import psycopg
 
-CURRENT_SCHEMA_VERSION = 2
+CURRENT_SCHEMA_VERSION = 3
 MIGRATION_COMMAND = "uv run --no-sync python -m db.apply_schema"
 
 
