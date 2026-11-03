@@ -9,6 +9,7 @@ $env:PYTHONUTF8 = '1'
 $env:PYTHONIOENCODING = 'utf-8'
 $Python = Join-Path $Root '.venv\Scripts\python.exe'
 $EnvFile = Join-Path $Root '.env'
+& (Join-Path $PSScriptRoot '..\scripts\sync.ps1')
 if (-not (Test-Path $Python)) { throw 'Create .venv with Python 3.11+ and install the project before launch.' }
 if (-not (Test-Path $EnvFile)) { throw "Project .env not found at $EnvFile. Copy .env.example and configure it first." }
 

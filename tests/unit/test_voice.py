@@ -4,8 +4,30 @@ import json
 import httpx
 import pytest
 
-from voice.app import VoiceProviders, app, configured_elevenlabs_voice
+from voice.app import VoiceProviders, app, configured_elevenlabs_voice, require_voice_extra
 from voice.stt_filter import AudioMetrics, is_known_hallucination, load_stt_settings
+
+
+def test_voice_server_names_missing_extra(monkeypatch):
+    import voice.app as voice_app
+
+    monkeypatch.setattr(
+        voice_app.importlib.util,
+        "find_spec",
+        lambda name: None if name == "sarvamai" else object(),
+    )
+    with pytest.raises(RuntimeError, match=r"voice extra.*missing: sarvamai"):
+        require_voice_extra()
+
+
+def test_launcher_sync_installs_all_optional_service_extras():
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]
+    sync_script = (root / "scripts" / "sync.ps1").read_text(encoding="utf-8")
+    launcher = (root / "deploy" / "start_all.ps1").read_text(encoding="utf-8")
+    assert "--extra voice --extra device --extra observability" in sync_script
+    assert "scripts\\sync.ps1" in launcher
 
 
 @pytest.fixture

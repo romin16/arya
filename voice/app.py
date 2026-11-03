@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import importlib.util
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -223,7 +224,19 @@ async def stop():
     return {"success": True, "message": "Playback stopped"}
 
 
+def require_voice_extra() -> None:
+    """Fail clearly when plain uv sync omitted the optional provider SDKs."""
+    required = ("elevenlabs", "sarvamai", "groq")
+    missing = [name for name in required if importlib.util.find_spec(name) is None]
+    if missing:
+        raise RuntimeError(
+            "Install ARYA's voice extra before starting arya-voice "
+            "(uv sync --extra voice); missing: " + ", ".join(missing)
+        )
+
+
 def main() -> None:
+    require_voice_extra()
     import uvicorn
 
     uvicorn.run(
