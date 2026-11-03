@@ -30,6 +30,7 @@ from core.graph.runtime import (
     MemoryEntity,
     MemoryEpisode,
     MemoryWrite,
+    MemoryRead,
     RouteDecision,
 )
 from core.app import app
@@ -689,6 +690,93 @@ async def test_graph_approval_restores_self_recipient_and_executes_only_after_co
         assert completed_audit["approved_by"] == user_token
         assert completed_audit["approved_at"] is not None
         assert completed_audit["approval_channel"] == "chat"
+    finally:
+        await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_outgoing_email_approval_uses_current_turn_not_recalled_episode(monkeypatch):
+    database_url = os.environ["ARYA_TEST_DATABASE_URL"]
+    session = f"phase7-current-email-{uuid4().hex}"
+    user_id = f"memory-user-{uuid4().hex}"
+    recipient = f"current-{uuid4().hex[:8]}@arya.dev"
+    calls = []
+
+    class Router:
+        async def ainvoke(self, messages):
+            return RouteDecision(
+                likely_skills=["email"],
+                memory_reads=[MemoryRead(store="episode", query="prior approval email", date=None)],
+                memory_intent="episode_read",
+            )
+
+    class Agent:
+        def __init__(self, address_token):
+            self.address_token = address_token
+            self.prompt = ""
+            self.bound_names = set()
+
+        def bind_tools(self, tools):
+            self.bound_names = {tool.name for tool in tools}
+            return self
+
+        async def astream(self, messages):
+            self.prompt = "\n".join(str(message.content) for message in messages)
+            stale = "edited approval text" in self.prompt or "Phase 6 approval test" in self.prompt
+            args = {
+                "to": [self.address_token],
+                "subject": "Phase 6 approval test" if stale else "Original approval text",
+                "body": "edited approval text" if stale else "original approval text",
+            }
+            yield AIMessageChunk(content="", tool_call_chunks=[{
+                "name": "gmail_send", "args": json.dumps(args),
+                "id": "current-turn-email", "index": 0,
+            }])
+
+    runtime = await _runtime(database_url, writer=ScriptedWriter(), session=session)
+    user_token = runtime.vault.tokenise(user_id)
+    recipient_token = runtime.vault.tokenise(recipient)
+    runtime.authorized_account_token = recipient_token
+    await runtime.memory.write_records(
+        user_token,
+        session,
+        {"episode": {
+            "summary": "Phase 6 approval test",
+            "body": "edited approval text",
+            "topics": ["email"],
+            "tools_used": ["gmail_send"],
+        }},
+        user_texts=["Earlier I approved a message."],
+    )
+    runtime.router_model = Router()
+    agent = Agent(recipient_token)
+    runtime.main_model = agent
+    runtime._queue_memory_write = lambda _state: None
+    _startup_mock_registry(monkeypatch, runtime, calls)
+    runtime.policy = ToolPolicy.from_file(
+        ROOT / "config/policy.yaml", set(runtime.tools) | set(runtime.memory_tools) | {"load_skill"},
+    )
+    runtime.graph = runtime._build_graph()
+    try:
+        approval, events = await _turn(
+            runtime, "Send an email to myself saying original approval text.", user_id,
+        )
+        assert "Phase 6 approval test" not in agent.prompt
+        assert "edited approval text" not in agent.prompt
+        assert "Memory context: " in agent.prompt
+        assert "gmail_send" in agent.bound_names
+        assert "memory_search" not in agent.bound_names
+        assert "original approval text" in approval.casefold()
+        assert "edited approval text" not in approval.casefold()
+        assert "Phase 6 approval test" not in approval
+        assert calls == []
+        assert any(event.get("activity", {}).get("event") == "Approval" for event in events)
+        pending = await runtime.memory.repositories.get_pending_operation(user_token, session)
+        assert pending and pending["operation_type"] == "tool_approval"
+        serialized = json.dumps(pending["payload"], ensure_ascii=False)
+        assert "original approval text" in serialized
+        assert "edited approval text" not in serialized
+        assert recipient not in serialized and recipient_token in serialized
     finally:
         await runtime.close()
 

@@ -78,6 +78,7 @@ async def _live_memory_routing(dataset: list[dict]):
 
     root = Path(__file__).resolve().parents[1]
     load_dotenv(root / ".env")
+    os.environ["LANGFUSE_TRACING_ENABLED"] = "false"
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY is required for --live")
@@ -116,6 +117,7 @@ async def _live_approvals(dataset: list[dict]):
 
     root = Path(__file__).resolve().parents[1]
     load_dotenv(root / ".env")
+    os.environ["LANGFUSE_TRACING_ENABLED"] = "false"
     api_key = os.getenv("OPENAI_API_KEY")
     account = os.getenv("GOOGLE_ACCOUNT")
     if not api_key or not account:
@@ -155,15 +157,19 @@ async def _live_approvals(dataset: list[dict]):
         async def set_pending_operation(self, user_id, thread_id, operation_type, payload, *, ttl_seconds):
             self.pending[(user_id, thread_id)] = {"operation_type": operation_type, "payload": payload}
 
+        async def active_procedures(self, user_id):
+            return []
+
     class MemoryMock:
-        def __init__(self):
+        def __init__(self, recalled_episode=""):
             self.repositories = MemoryRepositoriesMock()
+            self.recalled_episode = recalled_episode
 
         async def always_context_and_procedures(self, user_id, *, token_budget):
-            return "", []
+            return self.recalled_episode, []
 
         async def routed_reads(self, user_id, reads):
-            return ""
+            return self.recalled_episode
 
     class FakePool:
         async def __aenter__(self):
@@ -250,7 +256,7 @@ async def _live_approvals(dataset: list[dict]):
         runtime = CoreGraphRuntime()
         active = [case["skill"]]
         runtime.vault = vault
-        runtime.memory = MemoryMock()
+        runtime.memory = MemoryMock(case.get("recalled_episode", ""))
         runtime.saver = MemorySaver()
         runtime.skills = skills
         runtime.main_model = main_model
@@ -286,13 +292,23 @@ async def _live_approvals(dataset: list[dict]):
         snapshot = await runtime.graph.aget_state({"configurable": {"thread_id": session}})
         selected = list(snapshot.values.get("chosen_tools", []))
         interrupt_events = [event for event in events if event.get("activity", {}).get("event") == "Approval"]
+        approval_question = " ".join(
+            str(event.get("chunk", "")) for event in events
+        )
+        required_text = case.get("approval_must_include", [])
+        forbidden_text = case.get("approval_must_not_include", [])
+        content_check = all(text.casefold() in approval_question.casefold() for text in required_text)
+        content_check = content_check and all(
+            text.casefold() not in approval_question.casefold() for text in forbidden_text
+        )
         results.append({
             "id": case["id"],
             "expected": case["tool"],
             "actual": selected[0] if selected else "none",
             "expected_interrupt": case["interrupt"],
             "actual_interrupt": bool(interrupt_events),
-            "pass": bool(selected and selected[0] == case["tool"] and bool(interrupt_events) == case["interrupt"]),
+            "approval_content_check": content_check,
+            "pass": bool(selected and selected[0] == case["tool"] and bool(interrupt_events) == case["interrupt"] and content_check),
         })
     await http_client.aclose()
     return results

@@ -3,6 +3,17 @@
   utterance: Send an email to myself saying hi.
   tool: gmail_send
   interrupt: true
+- id: email_content_current_turn_only
+  skill: email
+  utterance: Send an email to myself saying original approval text.
+  tool: gmail_send
+  interrupt: true
+  recalled_episode: "Prior email subject: Phase 6 approval test. Prior email content: edited approval text."
+  approval_must_include:
+    - original approval text
+  approval_must_not_include:
+    - Phase 6 approval test
+    - edited approval text
 - id: whatsapp_message
   skill: whatsapp
   utterance: Message Test Contact on WhatsApp saying hi.

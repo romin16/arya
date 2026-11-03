@@ -59,6 +59,6 @@ def test_live_approval_eval_cases_match_configured_policy():
     policy = ToolPolicy(config, {
         "gmail_send", "whatsapp_send", "vscode_run_command", "close_app", "spotify_play",
     } | set(config["tools"]))
-    assert len(cases) == 5
+    assert len(cases) == 6
     for case in cases:
         assert policy.mode_for(case["tool"], {}) == ("ask" if case["interrupt"] else "auto")

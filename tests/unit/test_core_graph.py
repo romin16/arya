@@ -396,8 +396,9 @@ async def test_email_request_with_real_server_schemas_passes_strict_egress():
             system_text = next(message.content for message in messages if isinstance(message, SystemMessage))
             assert account_token in system_text
             assert raw_account not in system_text
-            assert "myself" in system_text
-            assert "Previous email preference" in system_text
+            assert "use only words supplied in the current user message" in system_text
+            assert "Previous email preference" not in system_text
+            assert "Current employer" not in system_text
             assert self.calls == 1
             yield AIMessageChunk(
                 content="",

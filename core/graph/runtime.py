@@ -67,6 +67,10 @@ DEVICE_TOOL_NAMES = {
     "open_downloads", "open_documents", "whatsapp_send", "whatsapp_voice_call", "vscode_open",
     "vscode_open_file", "vscode_search", "vscode_run_command", "vscode_format",
 }
+CONTENT_FROM_CURRENT_TURN_TOOLS = {
+    "gmail_send", "gmail_reply", "gmail_draft", "whatsapp_send",
+    "calendar_create", "calendar_quick_add", "calendar_update",
+}
 
 DEVICE_TOOL_DESCRIPTIONS = {
     "whatsapp_send": (
@@ -192,6 +196,7 @@ class ARYAState(MessagesState, total=False):
     thread_id: str
     now_ist: str
     memory_context: str
+    content_sensitive_turn: bool
     active_skills: list[str]
     procedures: list[dict[str, Any]]
     last_action: dict[str, Any] | None
@@ -1236,6 +1241,14 @@ class CoreGraphRuntime:
             else:
                 route_label = "none" if model_route == "memory_forget" else model_route
             active = self.skills.activate(likely)
+            selected_tool_names = self.skills.tool_names(active)
+            content_sensitive_turn = bool(
+                selected_tool_names & CONTENT_FROM_CURRENT_TURN_TOOLS
+            )
+            if content_sensitive_turn:
+                # Tool arguments that carry outgoing text must not be informed by
+                # recalled episodes, entities, action history, or a memory tool.
+                reads = []
             procedural_write_message = None
             memory_write_skip = False
             if route_label == "memory_forget":
@@ -1287,6 +1300,15 @@ class CoreGraphRuntime:
             async def read_memory(_input):
                 if self.memory is None:
                     return {"always": "", "procedures": [], "routed": ""}
+                if content_sensitive_turn:
+                    repositories = getattr(self.memory, "repositories", None)
+                    if repositories is not None and hasattr(repositories, "active_procedures"):
+                        procedures = await repositories.active_procedures(state["user_id"])
+                    else:
+                        _, procedures = await self.memory.always_context_and_procedures(
+                            state["user_id"], token_budget=600,
+                        )
+                    return {"always": "", "procedures": procedures, "routed": ""}
                 always_task = self.memory.always_context_and_procedures(
                     state["user_id"], token_budget=600,
                 )
@@ -1302,7 +1324,7 @@ class CoreGraphRuntime:
             always_context = memory_result["always"]
             procedures = memory_result["procedures"]
             routed = memory_result["routed"]
-            action = last_action or {}
+            action = {} if content_sensitive_turn else (last_action or {})
             action_tool = action.get("tool") or action.get("name")
             action_args = action.get("args", {})
             action_context = ""
@@ -1311,6 +1333,7 @@ class CoreGraphRuntime:
             return {
                 "active_skills": active,
                 "memory_context": "\n".join(part for part in (always_context, routed, action_context) if part),
+                "content_sensitive_turn": content_sensitive_turn,
                 "procedures": procedures,
                 "route_label": route_label,
                 "procedural_write_message": procedural_write_message,
@@ -1328,7 +1351,8 @@ class CoreGraphRuntime:
                 for name in ("web_search", "get_weather", "calculator")
                 if name in self.tools
             ]
-            always_tools.extend(self.memory_tools.values())
+            if not state.get("content_sensitive_turn"):
+                always_tools.extend(self.memory_tools.values())
             bound_tools = [self.load_skill_tool, *always_tools, *selected_tools]
             model = self.main_model.bind_tools(bound_tools)
             skill_context = self.skills.context(state.get("active_skills", []))
@@ -1340,16 +1364,32 @@ class CoreGraphRuntime:
                 if self.authorized_account_token
                 else ""
             )
+            content_source_rule = (
+                "For email send/reply/draft, WhatsApp messages, and calendar event titles or descriptions, "
+                "use only words supplied in the current user message or a later explicit approval edit. "
+                "Never take outgoing content from memories, earlier turns, entities, or last_action. If no "
+                "email subject was given, derive a short subject only from the current user's words.\n"
+                if state.get("content_sensitive_turn") else ""
+            )
             system_text = (
                 f"{self.persona}\n\n{FIXED_RULES}\n\nSkills index:\n{self.skills.index}\n\n"
                 f"Current time in IST: {state.get('now_ist', '')}.\n"
                 + account_context
+                + content_source_rule
                 + f"Last action: {json.dumps(last_action, ensure_ascii=False) if last_action else 'none'}\n"
                 + f"Memory context: {state.get('memory_context', '')}"
             )
             if skill_context:
                 system_text += "\n\nActive skill instructions:\n" + skill_context
-            messages = [SystemMessage(content=system_text), *state["messages"]]
+            if state.get("content_sensitive_turn"):
+                latest_user_index = max(
+                    index for index, message in enumerate(state["messages"])
+                    if isinstance(message, HumanMessage)
+                )
+                current_turn_messages = state["messages"][latest_user_index:]
+                messages = [SystemMessage(content=system_text), *current_turn_messages]
+            else:
+                messages = [SystemMessage(content=system_text), *state["messages"]]
             turn_budget = max(1, int(self.limits.get("turn_token_budget", 12000)))
             used_tokens = int(state.get("token_used", 0))
             prompt_tokens = _count_prompt_tokens(messages, bound_tools)
