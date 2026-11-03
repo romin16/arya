@@ -81,6 +81,24 @@ def test_phase1_schema_upgrades_without_losing_rows_and_is_repeatable():
             connection.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema)))
 
 
+def test_migration_is_not_recorded_when_its_expected_column_is_missing(tmp_path):
+    database_url = os.environ["ARYA_TEST_DATABASE_URL"]
+    schema = "verify_migration_" + uuid4().hex[:12]
+    bad_migration = tmp_path / "003_knowledge_chunk_title.sql"
+    bad_migration.write_text("SELECT 1;", encoding="utf-8")
+    with psycopg.connect(database_url) as connection:
+        connection.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
+        connection.execute(sql.SQL("SET search_path TO {}, public").format(sql.Identifier(schema)))
+        connection.commit()
+        try:
+            assert apply_migrations(connection, MIGRATIONS, target_version=2) == [1, 2]
+            with pytest.raises(RuntimeError, match="knowledge_chunks.title"):
+                apply_migrations(connection, tmp_path)
+            assert connection.execute("SELECT max(version) FROM schema_migrations").fetchone()[0] == 2
+        finally:
+            connection.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema)))
+
+
 @pytest.mark.asyncio
 async def test_phase1_schema_runs_all_memory_store_read_and_write_paths():
     database_url = os.environ["ARYA_TEST_DATABASE_URL"]

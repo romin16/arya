@@ -13,6 +13,52 @@ ROOT = Path(__file__).resolve().parents[1]
 MIGRATIONS = ROOT / "db" / "migrations"
 MIGRATION_RE = re.compile(r"^(\d{3})_([a-z0-9_]+)\.sql$")
 
+REQUIRED_COLUMNS_BY_VERSION = {
+    1: {
+        "entities": {"id", "user_id", "key", "value", "confidence", "source", "valid_from", "valid_to", "superseded_by"},
+        "episodes": {"id", "user_id", "thread_id", "ts", "summary", "body", "embedding", "topics", "tools_used", "tsv"},
+        "knowledge_docs": {"id", "user_id", "title", "source", "created_at"},
+        "knowledge_chunks": {"id", "doc_id", "chunk_idx", "text", "embedding", "metadata", "tsv"},
+        "procedures": {"id", "user_id", "rule_text", "scope", "tool_pattern", "severity", "active", "created_at"},
+        "patterns": {"id", "user_id", "text", "evidence_count", "confidence", "status", "first_seen", "last_seen", "embedding"},
+        "action_log": {"id", "user_id", "thread_id", "ts", "tool", "args", "status", "result_summary", "approved_by", "duration_ms"},
+        "pii_vault": {"token", "kind", "value_enc", "created_at"},
+    },
+    2: {
+        "knowledge_chunks": {"user_id"},
+        "procedures": {"confidence", "argument_constraints", "inactive_at"},
+        "patterns": {"pattern_key"},
+        "action_log": {"tool_call_id", "approved_at", "approval_channel"},
+        "pattern_observations": {"id", "user_id", "pattern_key", "text", "observation_day", "observation_count", "first_seen", "last_seen"},
+        "memory_tombstones": {"id", "user_id", "store", "fingerprint", "normalized_content", "created_at", "suppressed_until"},
+        "pending_operations": {"id", "user_id", "thread_id", "operation_type", "payload", "created_at", "expires_at"},
+    },
+    3: {"knowledge_chunks": {"title"}},
+}
+
+
+def verify_migration_objects(connection, version: int) -> None:
+    required = REQUIRED_COLUMNS_BY_VERSION.get(version)
+    if required is None:
+        raise RuntimeError(f"No post-migration object checks are registered for migration {version:03d}")
+    rows = connection.execute(
+        """SELECT table_name,column_name FROM information_schema.columns
+           WHERE table_schema=current_schema()"""
+    ).fetchall()
+    actual: dict[str, set[str]] = {}
+    for table, column in rows:
+        actual.setdefault(table, set()).add(column)
+    missing = [
+        f"{table}.{column}"
+        for table, columns in required.items()
+        for column in columns - actual.get(table, set())
+    ]
+    if missing:
+        raise RuntimeError(
+            f"Migration {version:03d} did not create required database objects: "
+            + ", ".join(sorted(missing))
+        )
+
 
 def apply_migrations(connection, migration_dir: Path = MIGRATIONS, *, target_version: int | None = None) -> list[int]:
     connection.execute(
@@ -50,13 +96,19 @@ def apply_migrations(connection, migration_dir: Path = MIGRATIONS, *, target_ver
                 raise RuntimeError(
                     f"Applied migration {version:03d} differs from its recorded name/checksum"
                 )
+            verify_migration_objects(connection, version)
             continue
-        connection.execute(content.decode("utf-8"))
-        connection.execute(
-            "INSERT INTO schema_migrations(version,name,checksum) VALUES (%s,%s,%s)",
-            (version, path.name, checksum),
-        )
-        connection.commit()
+        try:
+            connection.execute(content.decode("utf-8"))
+            verify_migration_objects(connection, version)
+            connection.execute(
+                "INSERT INTO schema_migrations(version,name,checksum) VALUES (%s,%s,%s)",
+                (version, path.name, checksum),
+            )
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
         applied[version] = (path.name, checksum)
         ran.append(version)
         print(f"Applied schema migration {version:03d}: {path.name}")
