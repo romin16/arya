@@ -13,6 +13,7 @@ from langchain_core.callbacks import BaseCallbackHandler
 logger = logging.getLogger("arya.core.observability")
 _warned: set[str] = set()
 _flush_threads: set[threading.Thread] = set()
+_connection_logged = False
 
 
 def _enabled_by_config() -> bool:
@@ -31,7 +32,11 @@ def _warn_once(name: str, error: BaseException) -> None:
     if name in _warned:
         return
     _warned.add(name)
-    logger.warning("%s observability disabled after %s", name, type(error).__name__)
+    logger.warning(
+        "%s observability temporarily unavailable after %s; retrying in background",
+        name,
+        type(error).__name__,
+    )
 
 
 def _tokenise_payload(value: Any, vault):
@@ -174,7 +179,7 @@ def langfuse_trace_config(*, vault, session_id: str, user_id: str) -> dict[str, 
 def langfuse_startup_status() -> tuple[bool, bool]:
     """Check credentials once at startup, without exposing any key material."""
     configured = _configured()
-    enabled = False
+    enabled = configured
     authenticated = False
     if configured:
         try:
@@ -184,7 +189,6 @@ def langfuse_startup_status() -> tuple[bool, bool]:
             CallbackHandler()
             client = get_client()
             authenticated = bool(client.auth_check())
-            enabled = True
             if not authenticated:
                 _warn_once("Langfuse", RuntimeError("auth_check failed"))
         except Exception as exc:
@@ -194,6 +198,33 @@ def langfuse_startup_status() -> tuple[bool, bool]:
         str(enabled).lower(), str(authenticated).lower(),
     )
     return enabled, authenticated
+
+
+def _probe_langfuse() -> bool:
+    from langfuse import get_client
+
+    return bool(get_client().auth_check())
+
+
+async def retry_langfuse_connection(*, initial_delay: float = 1.0, max_delay: float = 60.0) -> None:
+    """Retry authentication in the background until Langfuse becomes reachable."""
+    global _connection_logged
+    if not _configured():
+        return
+    delay = max(0.01, initial_delay)
+    while True:
+        try:
+            authenticated = await asyncio.to_thread(_probe_langfuse)
+        except Exception as exc:
+            _warn_once("Langfuse", exc)
+            authenticated = False
+        if authenticated:
+            if not _connection_logged:
+                _connection_logged = True
+                logger.info("Langfuse tracing connected")
+            return
+        await asyncio.sleep(delay)
+        delay = min(max_delay, delay * 2)
 
 
 def _schedule_flush(client) -> None:

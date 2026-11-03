@@ -12,6 +12,7 @@ from core.observability import (
     langfuse_chat_trace,
     langfuse_startup_status,
     langfuse_trace_config,
+    retry_langfuse_connection,
 )
 from core.pii.vault import PIIVault
 
@@ -184,8 +185,33 @@ def test_langfuse_down_is_failure_safe_and_warns_once(monkeypatch, caplog):
     with caplog.at_level(logging.WARNING, logger="arya.core.observability"):
         import asyncio
         assert asyncio.run(use_trace()) == "chat continued"
-        assert langfuse_startup_status() == (False, False)
-    assert sum("Langfuse observability disabled" in row.message for row in caplog.records) == 1
+        assert langfuse_startup_status() == (True, False)
+    assert sum("Langfuse observability temporarily unavailable" in row.message for row in caplog.records) == 1
+
+
+def test_langfuse_retries_in_background_and_logs_one_connection(monkeypatch, caplog):
+    import asyncio
+    import core.observability as observability
+
+    outcomes = iter((False, False, True))
+    monkeypatch.setattr(observability, "_probe_langfuse", lambda: next(outcomes))
+    monkeypatch.setattr(observability, "_connection_logged", False)
+    monkeypatch.setattr(observability, "_warned", set())
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "public-test")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "secret-test")
+    monkeypatch.setenv("LANGFUSE_HOST", "http://127.0.0.1:3000")
+    monkeypatch.setenv("LANGFUSE_TRACING_ENABLED", "true")
+
+    async def retry():
+        await asyncio.wait_for(
+            retry_langfuse_connection(initial_delay=0.001, max_delay=0.002), timeout=1,
+        )
+
+    with caplog.at_level(logging.INFO, logger="arya.core.observability"):
+        asyncio.run(retry())
+    assert sum("Langfuse tracing connected" in row.message for row in caplog.records) == 1
+    assert "public-test" not in caplog.text
+    assert "secret-test" not in caplog.text
 
 
 def test_langfuse_can_be_disabled_for_tests_and_local_runs(monkeypatch):

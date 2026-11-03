@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import sys
 import uuid
@@ -18,7 +19,11 @@ from openai import APIConnectionError
 from dotenv import load_dotenv
 
 from core.graph.runtime import CoreGraphRuntime
-from core.observability import langfuse_chat_trace, langfuse_startup_status
+from core.observability import (
+    langfuse_chat_trace,
+    langfuse_startup_status,
+    retry_langfuse_connection,
+)
 from core.sse import encode_event
 
 # Psycopg's async libpq integration requires a selector loop on Windows.
@@ -52,12 +57,18 @@ def _is_connection_failure(error: BaseException) -> bool:
 async def lifespan(app: FastAPI):
     load_dotenv(ROOT / ".env")
     app.state.langfuse_status = langfuse_startup_status()
+    langfuse_retry = asyncio.create_task(
+        retry_langfuse_connection(), name="arya-langfuse-retry",
+    )
     runtime = CoreGraphRuntime()
-    await runtime.start()
-    app.state.runtime = runtime
     try:
+        await runtime.start()
+        app.state.runtime = runtime
         yield
     finally:
+        langfuse_retry.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await langfuse_retry
         await runtime.close()
 
 
