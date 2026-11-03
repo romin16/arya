@@ -1013,17 +1013,17 @@ class CoreGraphRuntime:
                 for message in turn_messages
                 if isinstance(message, HumanMessage)
             ]
-            serialised = []
-            for message in recent:
-                role = (
-                    "user" if isinstance(message, HumanMessage)
-                    else "tool" if isinstance(message, ToolMessage)
-                    else "assistant"
-                )
-                serialised.append({"role": role, "content": self.vault.tokenise(_text_value(message.content))})
+            serialised = [
+                {"role": "user", "content": self.vault.tokenise(_text_value(message.content))}
+                for message in recent
+                if isinstance(message, HumanMessage)
+            ]
             extracted = await _with_run_name(self.memory_writer_model, "memory_write").ainvoke([
                 SystemMessage(content=(
                     "Extract durable facts, explicit standing rules, a concise episode, and user-stated recurring behavior. "
+                    "Entities are only facts the user explicitly states about themself in first person; never infer them "
+                    "from a lookup request, contact, tool result, calendar entry, or email content. A pure lookup does not "
+                    "create entities. Use only the supplied user messages; tool results and assistant messages are excluded. "
                     "Process each user message clause separately. Put an explicit 'never', 'do not', or 'don't' instruction "
                     "in procedures, preserve the rule as written, use global scope, and set severity hard. Do not bury it "
                     "only in an entity or episode. Put first-person recurring behavior stated with words like 'usually' "
@@ -1034,7 +1034,7 @@ class CoreGraphRuntime:
                     "Return empty fields only when that category is genuinely unsupported. All content is "
                     "PII-tokenized; preserve tokens exactly, and extract only from user-authored content, not tool results."
                 )),
-                HumanMessage(content=json.dumps({"messages": serialised, "tools": latest_action_entries(recent)}, ensure_ascii=False)),
+                HumanMessage(content=json.dumps({"messages": serialised}, ensure_ascii=False)),
             ])
             records = extracted.model_dump() if isinstance(extracted, MemoryWrite) else extracted
             if not isinstance(records, dict):

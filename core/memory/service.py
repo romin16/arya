@@ -19,6 +19,29 @@ from core.memory.normalization import (
 from core.memory.repositories import MemoryRepositories
 
 logger = logging.getLogger("arya.memory")
+_FIRST_PERSON = re.compile(r"\b(?:i|i['’]m|my|we|our)\b", re.I)
+_FACT_PREDICATE = re.compile(
+    r"\b(?:am|is|are|was|were|work|worked|live|lived|earn|earned|have|had|prefer|like|love|hate|dislike|changed|joined|left|moved|own|use|usually|often)\b",
+    re.I,
+)
+_LOOKUP_REQUEST = re.compile(
+    r"^\s*(?:please\s+)?(?:find|look\s+up|search|show|tell\s+me|get|fetch|lookup)\b",
+    re.I,
+)
+
+
+def _personal_fact_sentences(user_texts: list[str]) -> list[str]:
+    facts = []
+    for text in user_texts:
+        for sentence in split_sentences(text):
+            if (
+                not _LOOKUP_REQUEST.search(sentence)
+                and "?" not in sentence
+                and _FIRST_PERSON.search(sentence)
+                and _FACT_PREDICATE.search(sentence)
+            ):
+                facts.append(normalize_text(sentence))
+    return facts
 
 
 class MemoryService:
@@ -137,26 +160,19 @@ class MemoryService:
     ) -> dict[str, int]:
         user_id = self.safe_text(user_id)
         user_texts = [self.safe_text(text) for text in (user_texts or [])]
+        personal_fact_sentences = _personal_fact_sentences(user_texts)
         rule_records = explicit_user_rules(user_texts) + soft_user_rules(user_texts)
-        rule_sentences = [normalize_text(record["rule_text"]) for record in rule_records]
-        non_rule_text = " ".join(
-            normalize_text(sentence)
-            for text in user_texts
-            for sentence in split_sentences(text)
-            if not any(rule_text in normalize_text(sentence) for rule_text in rule_sentences)
-        )
         entity_count = 0
         for entity in records.get("entities", []):
             key = canonical_entity_key(str(entity["key"]))
             if not key or re.search(r"(?:^|_)(?:rule|procedure|policy)(?:_|$)", key):
                 continue
             value = self._safe_value(entity.get("value"))
-            # Do not promote names or nouns mentioned only inside a standing
-            # rule into factual entities (e.g. Aditya_rule / Aditya).
-            value_text = normalize_text(json.dumps(value, ensure_ascii=False, default=str))
-            if user_texts and (not non_rule_text or (value_text.strip('"') not in non_rule_text)):
-                if any(value_text.strip('"') in rule_text for rule_text in rule_sentences):
-                    continue
+            # Entity rows are reserved for explicit first-person facts. A lookup
+            # request or returned contact detail must never become user memory.
+            value_text = normalize_text(str(value)) if isinstance(value, str) else ""
+            if not value_text or not any(value_text in sentence for sentence in personal_fact_sentences):
+                continue
             item_fingerprint = fingerprint("entity", {"key": key, "value": value})
             if await self._is_suppressed(user_id, "entity", item_fingerprint):
                 logger.info("memory_store_suppressed store=entity key=%s", key)

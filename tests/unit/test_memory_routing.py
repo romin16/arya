@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 import yaml
 from cryptography.fernet import Fernet
-from langchain_core.messages import AIMessageChunk, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessageChunk, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import StructuredTool
 from langgraph.checkpoint.memory import MemorySaver
 
@@ -18,6 +18,7 @@ from core.graph.runtime import (
     _has_explicit_memory_forget_intent,
 )
 from core.memory.normalization import canonical_entity_key, explicit_user_rules
+from core.memory.service import MemoryService
 from core.memory.policy_gate import hard_rule_for
 from core.pii.vault import PIIVault
 from core.skills_runtime import SkillsRuntime
@@ -397,6 +398,70 @@ async def test_background_writer_logs_full_error(caplog):
     })
     assert "Background memory_write failed" in caplog.text
     assert "RuntimeError: mock structured output error" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_background_writer_excludes_contact_tool_results_and_rejects_lookup_facts():
+    raw_phone = "+1 415-555-0184"
+
+    class Repo:
+        def __init__(self):
+            self.entity_writes = []
+            self.procedure_writes = []
+
+        async def is_suppressed(self, *args):
+            return False
+
+        async def upsert_entity(self, *args, **kwargs):
+            self.entity_writes.append((args, kwargs))
+
+        async def add_procedure(self, *args, **kwargs):
+            self.procedure_writes.append((args, kwargs))
+
+    repo = Repo()
+    vault = PIIVault(b"lookup-result-filter", Fernet.generate_key())
+    runtime = CoreGraphRuntime()
+    runtime.vault = vault
+    runtime.memory = MemoryService(repo, vault, lambda _text: None)
+    writer_payloads = []
+
+    class Writer:
+        async def ainvoke(self, messages):
+            prompt = messages[-1].content
+            writer_payloads.append(prompt)
+            assert raw_phone not in prompt
+            assert "contact_lookup_result_secret" not in prompt
+            return MemoryWrite(
+                entities=[
+                    {"key": "contact", "value": "Aditya"},
+                    {"key": "phone", "value": raw_phone},
+                    {"key": "phone_type", "value": "mobile"},
+                    {"key": "phone_owner", "value": "Aditya"},
+                ],
+                procedures=[
+                    {"rule_text": "Never contact Aditya", "severity": "hard"},
+                    {"rule_text": "Always call Aditya", "severity": "hard"},
+                ],
+                episode=None,
+                patterns=[],
+            )
+
+    runtime.memory_writer_model = Writer()
+    await runtime._background_memory_write({
+        "messages": [
+            HumanMessage(content="Find Aditya's phone number"),
+            ToolMessage(
+                content="Aditya: " + raw_phone + " contact_lookup_result_secret",
+                name="contacts_search",
+                tool_call_id="lookup-1",
+            ),
+        ],
+        "user_id": "user-test",
+        "thread_id": "lookup-thread",
+    })
+    assert len(writer_payloads) == 1
+    assert repo.entity_writes == []
+    assert repo.procedure_writes == []
 
 
 def test_real_tool_schema_fixture_and_skill_are_loaded_for_graph_regression():

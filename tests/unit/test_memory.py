@@ -127,3 +127,44 @@ async def test_casual_chat_does_not_become_a_hard_procedure():
     assert repo.procedures[0][1]["severity"] == "soft"
     assert repo.procedures[0][1]["confidence"] == 0.3
     assert repo.procedures[0][1]["tool_pattern"] == "*"
+
+
+@pytest.mark.asyncio
+async def test_read_only_contact_lookup_cannot_write_entities_or_procedures():
+    class Repo:
+        def __init__(self):
+            self.entities = []
+            self.procedures = []
+
+        async def is_suppressed(self, *args):
+            return False
+
+        async def upsert_entity(self, *args, **kwargs):
+            self.entities.append((args, kwargs))
+
+        async def add_procedure(self, *args, **kwargs):
+            self.procedures.append((args, kwargs))
+
+    repo = Repo()
+    memory = MemoryService(
+        repo, PIIVault(b"contact-lookup-memory", Fernet.generate_key()), lambda _text: None,
+    )
+    counts = await memory.write_records(
+        "user", "thread",
+        {
+            "entities": [
+                {"key": "contact", "value": "Aditya"},
+                {"key": "phone", "value": "+1 415-555-0184"},
+                {"key": "phone_type", "value": "mobile"},
+                {"key": "name", "value": "Aditya"},
+            ],
+            "procedures": [
+                {"rule_text": "Never message Aditya", "severity": "hard"},
+                {"rule_text": "Always call Aditya", "severity": "hard"},
+            ],
+        },
+        user_texts=["Find Aditya's phone number"],
+    )
+    assert repo.entities == []
+    assert repo.procedures == []
+    assert counts["entities"] == counts["procedures"] == 0
