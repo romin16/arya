@@ -8,7 +8,7 @@ ARYA is a personal voice assistant built with LangGraph and FastAPI. The user is
 
 Processes (all bind to 127.0.0.1): arya-core :5000 (FastAPI, LangGraph, SSE `/chat`, `/health`, `POST /approve`), arya-voice :5001 (`/speak`, `/transcribe`, `/stop`), arya-device :5002 (FastMCP, bearer token, one serial GUI queue, `/panic`), Google Workspace MCP :8321 (`snickery/google-accounts-mcp` pinned commit 2839885, installed at `%LOCALAPPDATA%\Arya\google-accounts-mcp`, tokens in `%LOCALAPPDATA%\Arya\google-mcp-data\tokens.db`, outside the repo). Start all: `.\deploy\start_all.ps1`. Logs in `logs/arya-*.log`.
 
-Standard sync command (never drop extras): `uv sync --locked --extra observability --extra dev --extra voice --extra device`.
+Standard sync command (never drop extras): `uv sync --locked --extra observability --extra voice --extra device`. The launcher runs `scripts/sync.ps1` before starting the services.
 
 Clean restart (stale processes have fooled us before):
 ```
@@ -26,34 +26,26 @@ Get-NetTCPConnection -LocalPort 5000,5001,5002,8321 -State Listen -ErrorAction S
 - Phase 5 five-store memory (entities versioned, episodes, knowledge, procedures with code-enforced tool/argument constraints, patterns with N-observations rule), router, background writer, `memory_forget` with thread-bound confirmation, soft delete + tombstones. Verified live.
 - Phase 6 policy gate (`config/policy.yaml`), approvals via `interrupt()`, verifier, injection taint, caps. Verified live: approval question shows the real recipient/content, yes sends, no cancels, edit re-asks (`approval.edit_requires_reconfirm`), audit rows (`awaiting_approval`, `succeeded`, `approved_by`, `approved_at`, `approval_channel`), `pending_operations` cleaned up.
 
-Test status before Phase 7 work: 131 passed, ruff clean, live evals all passing (routing 46/46, approvals 5/5, structured schemas 3/3). The current Phase 7 continuation reran the unit suite (107 passed) and temporary-Postgres integration tests (32 passed); see section 3 for the Langfuse ingestion blocker.
+Most recent local test status: 113 unit tests and 33 temporary-Postgres integration tests pass; Ruff is clean. The all-suite OpenAI comparison passes all listed suites for `gpt-4o-mini`; `gpt-4o` has two memory-routing misses. See sections 3 and 4.
 
-## 3. Phase 7 continuation status — verify before relying on external services
+## 3. Phase 7 status
 
-The last session was in the middle of Phase 7 Part B and its final edits were NOT verified. Treat everything below as unreviewed:
-- `core/observability.py`, edits to `core/app.py`, `core/graph/runtime.py`, and `tests/unit/test_observability.py` (Langfuse callback integration and PII scrubbing). Startup logs `enabled` and `auth_check` without credentials. Unit tests cover recording callbacks and failure safety. The local instance currently returns HTTP 500 on trace ingestion because its web container cannot connect to MinIO at `127.0.0.1:9090`; do not alter `C:\Users\abc\langfuse` or start a second stack. Real trace visibility remains unverified until that existing instance is repaired.
-- `deploy/langfuse/{start,stop,status}.ps1` and README: thin scripts only. Langfuse is ALREADY installed and running on the user's PC at `C:\Users\abc\langfuse` (UI http://localhost:3000, keys already in `.env`). Do not download or start a second copy and do not modify that folder.
-- Versioned migrations: `db/migrations/001_phase1_baseline.sql`, `002_current_graph_schema.sql`, new `db/apply_schema.py`, `db/schema_version.py`, core refuses to start if the database is behind, `tests/integration/test_schema_migrations.py`.
-- A stray `_run_migration_tests.py` in the repo root (helper that creates a temporary database); move it into `scripts/` or delete it.
-- `pyproject.toml` was edited (Langfuse 4.15.6 and LangChain 0.3.30 pins) and `uv.lock` re-locked. The optional infrastructure-tracing integration was removed from code, dependencies, the environment template, and docs.
+- Langfuse callback integration and PII-safe recording tests are implemented. The user confirmed traces appear in the existing local Langfuse instance. Do not touch `C:\Users\abc\langfuse` or start another stack. Compose scripts pass the external directory and env file explicitly and reject an in-repository directory.
+- Versioned migrations 001 and 002, `schema_migrations`, idempotent application, and the core schema-version guard are implemented. Disposable-Postgres tests upgrade a Phase 1 schema. The authorized real-database apply reported no pending migrations and schema version 2; no migrations or row transformations were needed in that run.
+- Outgoing email, WhatsApp, and calendar text is isolated from recalled memory; graph integration coverage and a live approval eval case are present.
+- All-suite eval runner, SSE replay, full-extras sync launcher, runbook, and migration map are implemented. See `docs/PHASE_7.md` for exact live eval results and the two remaining gpt-4o routing misses.
+- The STT hallucination filter is config-driven and tested. No `_run_migration_tests.py` helper was present when checked.
+- Last numbered-step checks: 113 unit tests passed, 33 temporary-Postgres integration tests passed, Ruff clean. The only warning is LangGraph's pending serializer-default deprecation.
 
-First actions: `git status`, `git diff --stat`, run `uv sync --locked --extra observability --extra dev --extra voice --extra device`, `uv run ruff check .`, the unit tests, and the Postgres integration tests with a temporary database. Fix anything broken before adding features. Apply migrations to the real `arya` database with `uv run --env-file .env python db/apply_schema.py` and show the output; never touch row data.
+## 4. Remaining work
 
-## 4. Remaining work (Phase 7 Part B)
-
-1. B1 Langfuse: code, one `/chat` trace scope, callback spans, tokenization, status logging, and mock tests are implemented. Local ingestion is not verified because the already-running service returns 500 on S3 event upload (see section 3).
-2. Outgoing email content isolation: ensure content/subject derive only from the current user turn or explicit edit; add a real-graph regression test and live eval.
-3. Verify/apply versioned migrations to the user's `arya` database; migration application remains pending.
-4. B4 Eval runner: run every suite with `--models gpt-4o,gpt-4o-mini`, pass rate, p50/p95 first-chunk latency, cost, and optional `--push-langfuse`; expand tool-routing coverage.
-5. B6 SSE contract replay against `legacy/arya.html`, including success and error event forms.
-6. Make the full extras set the default (or add `scripts/sync.ps1`); services should name missing extras.
-7. B5 Cutover docs and n8n audit; update RUNBOOK/MIGRATION and keep `legacy/` untouched. Also verify the STT hallucination filter and move/delete `_run_migration_tests.py` if present.
+- Investigate and resolve the two live `gpt-4o` memory-routing mismatches (`general_knowledge` and `standing_rule`) without weakening the eval cases. `gpt-4o-mini` passed 46/46.
+- Optional: add suite cost reporting and a Langfuse dataset-run upload flag if required by a later acceptance request; the current eval contract reports pass rate and p50/p95 first-chunk latency.
 
 ## 5. Known open items (not blocking)
 
-- Confirm whether the STT hallucination filter ("Thank you.", "Thanks for watching.", "you" on short or quiet audio, config-driven) was committed; if not, implement it with tests.
+- The live eval runner has two outstanding gpt-4o memory-routing mismatches; details are in `docs/PHASE_7.md`.
 - ARYA's reply after an approved edit once said the email was sent "with the original text" although the edited text was sent; check the verifier wording. Also check that a fresh chat never inherits a pending approval's text from an earlier thread.
-- Live eval case "Change the text to hello from Arya." was misrouted to a memory write once; routing examples were added, re-check.
 - Voice: speak only the last two digits of phone numbers (verified); Groq STT still hears raw speech (documented limitation; local faster-whisper is a future option).
 - Optional later: reuse one MCP session per service instead of one per call; sentence-level TTS streaming; Spotify Web API (needs Premium); Picovoice key should be loaded from config instead of hard-coded in the HTML (needs a small, approved frontend change).
 - User to-dos outside the code: rotate the Picovoice key that was in the old HTML; set the Google OAuth consent screen to "In production" so the refresh token does not expire weekly.

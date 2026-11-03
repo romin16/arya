@@ -1,59 +1,92 @@
-# ARYA runbook
+# ARYA Windows runbook
 
-## Local setup
+This runbook starts with a fresh Windows 10/11 machine. Commands below run from the repository root in PowerShell. Keep `.env` and all tokens out of source control.
 
-1. Copy `.env.example` to `.env`. Configure the Postgres URL, OpenAI/Groq/TTS keys, device token, Google OAuth credentials, `GOOGLE_MCP_TOKEN`, and search keys. Keep `.env` private.
-2. Create the project Python 3.12 virtual environment and install the project with its `device` and `dev` extras. Node.js 22.12+ and `uv` are needed for the pinned Google MCP server setup.
-3. In Google Cloud Console, enable Gmail API, Calendar API, and People API. Create an OAuth 2.0 client ID of type **Desktop app**. Put its ID and secret in `GOOGLE_OAUTH_CLIENT_ID` and `GOOGLE_OAUTH_CLIENT_SECRET` in `.env`. Generate a random bearer token for `GOOGLE_MCP_TOKEN`.
-4. Apply database migrations before starting core:
+## 1. Install prerequisites
 
-   ```powershell
-   uv run --no-sync python -m db.apply_schema
-   ```
+Install Python 3.12, `uv`, Git, Node.js 22.12+, and PostgreSQL 18 with the pgvector extension available. The device service is intended for Windows and uses the local desktop session. Create a local clone of this repository and open PowerShell there.
 
-   Migrations are ordered, checksummed, and safe to re-run. Core checks `schema_migrations` at startup and refuses to run against a missing or older schema; run the command again after updating the application.
+## 2. Configure the project
 
-5. Run the one-time local OAuth setup in PowerShell:
+```powershell
+Copy-Item .env.example .env
+notepad .env
+```
 
-   ```powershell
-   .\scripts\setup_google_mcp.ps1 -Account you@example.com
-   ```
+Set the Postgres `DATABASE_URL`, `OPENAI_API_KEY`, `DEVICE_TOKEN`, Google OAuth values (`GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET`, `GOOGLE_ACCOUNT`, `GOOGLE_MCP_TOKEN`), voice provider keys, and any search provider keys you plan to use. Set a strong random value for each bearer-token setting. Do not paste `.env` contents into logs or chat.
 
-   The script checks out the pinned `google-accounts-mcp` commit under `%LOCALAPPDATA%\Arya`, applies the loopback bind patch, syncs its locked dependencies, and stores data under `%LOCALAPPDATA%\Arya\google-mcp-data`. It checks `tokens.db` for the requested account and skips OAuth if that account is already authorized. Otherwise it opens Google's consent page. Sign in and grant access.
+Install the pinned project and all runtime extras:
 
-6. Start the four local processes:
+```powershell
+uv sync --locked --extra observability --extra voice --extra device
+```
 
-   ```powershell
-   .\deploy\start_all.ps1
-   ```
+The launcher also runs `scripts/sync.ps1` so a prior plain `uv sync` cannot leave the services without their extras.
 
-   The launcher maps project OAuth and account values to `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, and `DEFAULT_ACCOUNT`, and maps `GOOGLE_MCP_TOKEN` to `MCP_BEARER_TOKEN`. It starts the documented `uv run google-accounts-mcp` command on port 8321, bound to `127.0.0.1`; core connects to `http://127.0.0.1:8321/mcp`. Health checks include a bearer-authenticated MCP initialize request. Press Ctrl+C in the launcher window to stop them.
+## 3. Prepare PostgreSQL and apply migrations
 
-   Use `.\deploy\start_all.ps1 -NoCore` to start device, voice, and Google MCP without starting core. Each service writes to `logs/<service>.log` with stderr in a companion `logs/<service>.stderr.log`; if any service exits, the launcher prints the last 40 lines of both streams.
+Create the `arya` database and enable the required extensions as a database administrator, then apply the versioned migrations:
+
+```powershell
+psql -d arya -c "CREATE EXTENSION IF NOT EXISTS vector;"
+psql -d arya -c "CREATE EXTENSION IF NOT EXISTS pgcrypto;"
+uv run --env-file .env python db/apply_schema.py
+```
+
+The migration runner is idempotent and records applied versions in `schema_migrations`. Core checks the database version at startup and reports an actionable error if it is behind the application.
+
+## 4. Configure Google Workspace access
+
+In Google Cloud Console, enable Gmail, Calendar, and People APIs. Create a Desktop OAuth client and put its ID and secret in `.env`. Set `GOOGLE_ACCOUNT` to the authorized account and choose `GOOGLE_MCP_TOKEN`.
+
+Run the setup script once:
+
+```powershell
+.\scripts\setup_google_mcp.ps1 -Account you@example.com
+```
+
+It installs the pinned Google MCP server under `%LOCALAPPDATA%\Arya`, stores its token database and attachments outside this repository, and skips browser authorization when the requested account is already present. Otherwise, complete the Google consent screen. Drive and Tasks remain hidden from ARYA.
+
+## 5. Start ARYA
+
+```powershell
+.\deploy\start_all.ps1
+```
+
+The launcher starts the authenticated device MCP server on 127.0.0.1:5002, voice on 127.0.0.1:5001, Google Workspace MCP on 127.0.0.1:8321, and core on 127.0.0.1:5000. It checks each service before continuing and writes output to `logs/`. Press Ctrl+C to stop the services.
+
+To start device, voice, and Google MCP without core:
+
+```powershell
+.\deploy\start_all.ps1 -NoCore
+```
+
+The active Langfuse installation is managed separately. Its scripts use `LANGFUSE_COMPOSE_DIR` (default `C:\Users\abc\langfuse`) and pass that directory and its `.env` explicitly to Compose. They refuse to run if the configured directory resolves inside this repository. Do not create a second Langfuse stack.
+
+## 6. First checks
+
+In a second PowerShell window:
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:5000/health
+Invoke-RestMethod http://127.0.0.1:5001/health
+Invoke-RestMethod -Headers @{ Authorization = "Bearer $env:DEVICE_TOKEN" } http://127.0.0.1:5002/health
+```
+
+Open the existing `legacy/arya.html` frontend locally. Try an exact-reply request, a weather query with a named location, and harmless Spotify play/pause actions. For approval testing, use only an email to yourself or a non-production test contact; verify the approval question before approving. Never use a real recipient for destructive or external tests.
 
 ## Search provider
 
-`config/search.yaml` selects `search.provider`. `google_cse` uses `GOOGLE_SEARCH_API_KEY` and `GOOGLE_SEARCH_ENGINE_ID`; the implementation returns only the first five titles, URLs, and snippets. If Google returns a quota or permission status (HTTP 401, 403, or 429), it tries configured fallback providers in order when their keys exist.
+`config/search.yaml` selects `search.provider`. Google Custom Search uses `GOOGLE_SEARCH_API_KEY` and `GOOGLE_SEARCH_ENGINE_ID`; results are capped at five. On quota or permission errors, configured alternatives are tried when their keys exist. Tavily and Brave can be selected by changing this setting and providing the matching key. Switching providers requires only a config change. Google has announced that Custom Search JSON API access will close to new customers and the API will be discontinued on January 1, 2027.
 
-Tavily and Brave are implemented as provider alternatives. To switch, change `search.provider` to `tavily` or `brave` and set `TAVILY_API_KEY` or `BRAVE_SEARCH_API_KEY`. No graph or tool changes are needed. Google has announced Custom Search JSON API closure to new customers and discontinuation on January 1, 2027, so choose a fallback before then.
+## Tests and operations
 
-Weather uses Open-Meteo geocoding and forecast APIs. If a request lacks a location, ARYA asks for one rather than guessing.
+```powershell
+uv run ruff check .
+uv run pytest tests/unit -q
+uv run python scripts/run_postgres_tests.py
+```
 
-## Approval boundary
+The Postgres test runner creates and drops a uniquely named disposable database. Tests mock HTTP providers, Google MCP, and GUI calls; they do not operate the desktop or contact real provider accounts.
 
-Policy marks Gmail send/reply/trash, Calendar delete, and Contact delete as `ask`. The Phase 6 approval graph is not implemented yet, so those adapters refuse the call with a clear message and do not contact Google. Draft creation and non-destructive reads/updates remain available according to `config/policy.yaml`. Only Gmail, Calendar, and Contacts tools are exposed to the agent; upstream Drive, shared-file, and Tasks tools are filtered out.
-
-Outbound model payloads re-tokenize genuine email addresses and phone numbers before sending. `PII_EGRESS_STRICT=1` makes the guard fail closed; pytest sets this flag for CI and regression runs. Reserved example-domain addresses and obvious placeholder numbers are ignored. PII diagnostics record the kind, payload location, path, and a short hash, never the value.
-
-## Memory deletion retention
-
-Forgotten procedures are soft-deleted immediately. All memory reads, injected rules, policy checks, and deletion counts ignore inactive procedures. Nightly consolidation physically purges them after `memory.inactive_procedure_retention_days` (90 days by default). Their tombstones remain governed independently by `memory.tombstone_suppression_days` and prevent background extraction from recreating them during that suppression window.
-
-## Manual checks
-
-- Confirm the launcher reports all four processes healthy.
-- In the unmodified `legacy/arya.html`, check Gmail search/read/draft, a Calendar lookup/create/update, and a Contacts search/create/update using a test account. The configured send/reply/trash and delete tools should explain that Phase 6 approval is not available and leave Google unchanged; don't invoke destructive operations during this check.
-- Try a weather request without a city and confirm ARYA asks; give a city and confirm forecast output.
-- Check `web_search` returns at most five compact results. To test provider fallback, temporarily select a provider/key combination known to reject requests; no real provider request should be used by automated tests.
-
-Automated unit tests mock Google MCP tools and all HTTP provider requests. They never use the real Google account or search APIs.
+Forgotten procedures are soft-deleted immediately. Reads, injected rules, policy enforcement, and user-facing counts ignore inactive rows. Nightly consolidation purges inactive procedure rows after `memory.inactive_procedure_retention_days` (90 days by default); tombstones separately suppress re-creation for the configured suppression window.

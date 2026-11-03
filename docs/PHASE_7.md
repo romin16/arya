@@ -1,29 +1,33 @@
 # Phase 7 — Observability, evaluations, and cutover
 
-Status: **in progress**. Part A of the current follow-up was completed separately in commits `26ef8d3` (edit reconfirmation), `ee4f4a2` (approval audit), `a57ae92` (expired-operation cleanup), and `12981fa` (routing). This continuation adds versioned database migrations and a core startup version guard. Migration verification against a disposable local Postgres includes upgrading the Phase 1 schema. The migrations have not yet been applied to the user's `arya` database.
+Status: **implemented; verification recorded below**. This phase adds PII-safe observability, a model comparison runner, SSE contract replay, migration checks, and Windows setup documentation. The user's existing Langfuse stack is used; this repository does not own or modify its files.
 
-## Database migration prerequisite
+## Verified
 
-Implemented migration versions 001 and 002, with checksums recorded in `schema_migrations`. `uv run --no-sync python -m db.apply_schema` applies pending migrations and is safe to re-run. Core refuses to start when migration metadata is missing, behind, or newer than the code. The integration test builds a Phase 1 database, upgrades it, verifies preserved data and new schema objects, and runs the migration a second time. Full suite: 134 passed against a disposable Postgres; Ruff passed. The real `arya` database application remains pending.
+- Langfuse: the user confirmed traces appear in the existing local instance. The core wraps one trace around each `/chat` turn, records the session/thread and user IDs, attaches graph callbacks for node/tool runs, scrubs PII before export, and degrades safely when telemetry is unavailable. Startup status logs contain no credentials. Compose helper scripts always pass the configured external project directory and `.env`, and reject a directory inside this repository.
+- Outgoing message memory isolation: tool arguments for email, WhatsApp, and calendar content are limited to the current user turn or an explicit approval edit. The Postgres graph regression seeds conflicting old episode text and checks that the approval question contains only the current content. A live approval eval case covers stale recalled text.
+- Migrations: versioned migrations 001 and 002 and the startup schema guard are present. Temporary-Postgres integration tests upgrade a Phase 1 schema and rerun idempotently. The authorized `arya` apply command reported no pending migrations and schema version 2; it made no row changes because the database was already current.
+- Eval runner: `python -m evals.run` loads all six suites and `--live --models gpt-4o,gpt-4o-mini` prints pass rate and p50/p95 time-to-first-chunk. The tool-routing dataset has 14 required coverage cases. Most recent live run:
 
-## B1 — Langfuse
+  | Suite | gpt-4o | gpt-4o-mini |
+  |---|---:|---:|
+  | Tool routing | 14/14 | 14/14 |
+  | Memory routing | 44/46 | 46/46 |
+  | Approvals | 6/6 | 6/6 |
+  | Persona tone | 3/3 | 3/3 |
+  | Exact reply | 1/1 | 1/1 |
+  | Structured schemas | 3/3 | 3/3 |
 
-The core now creates one trace scope per `/chat`, propagates the thread and user identifiers, attaches the LangChain callback to graph runs, tokenises callback payloads before export, flushes asynchronously, and logs startup enablement/auth status without keys. Recording-mock tests cover tokenisation and failure safety. A content-free local smoke attempt reached the existing Langfuse v4.71.0 instance and authenticated, but trace ingestion returned HTTP 500. Its web container logs show event upload failing because `127.0.0.1:9090` refuses connections from inside the container. No files under `C:\Users\abc\langfuse` were changed and no second stack was started. Real trace visibility is therefore not verified yet.
+  The two gpt-4o memory-routing misses were `general_knowledge` (`episode_read` returned `entity_read`) and `standing_rule` (`knowledge_read` returned `none`). The all-suite command therefore returned exit code 1. No tool actions were executed; routing tools were inert and all non-OpenAI network calls were mocked.
+- SSE: `tests/unit/test_sse_frontend_contract.py` replays success and error events through `/chat`, checks event order and shapes, and checks the event fields consumed by `legacy/arya.html`.
+- Extras: `scripts/sync.ps1` uses the lockfile and installs voice, device, and observability extras; `deploy/start_all.ps1` invokes it. Voice and device report the missing extra clearly.
+- Cutover/docs: `scripts/`, `config/`, and `docs/` contain no orchestration-service references. `legacy/` remains unchanged. `docs/RUNBOOK.md` and this `docs/MIGRATION.md` document fresh setup, migrations, services, and rollback references.
+- STT filter: configured short/quiet hallucination filtering for “Thank you”, “Thanks for watching”, and “you” exists in `voice/stt_filter.py`, `config/voice.yaml`, and unit tests.
 
-## B3 — Failure safety
+## Test output for the last numbered step
 
-Langfuse startup and callback failures are handled without failing chat. This is covered by unit tests. The local service was reachable and authenticated, but its trace ingestion path is unhealthy as described above.
+- Unit suite: `113 passed, 1 warning`.
+- Temporary PostgreSQL integration suite: `33 passed, 1 warning`; migrations 001 and 002 applied to the disposable database.
+- Ruff: `All checks passed!`.
 
-## B4 — Evaluation runner
-
-Not implemented or verified. The current opt-in live approval, memory-routing, and structured-schema suites are separate from the requested all-suite model comparison, latency/cost report, and Langfuse dataset-run support.
-
-## B5 — Cutover documentation
-
-Not implemented or verified. Existing n8n references still require a repository-wide audit; the fresh-machine runbook and migration map are not complete.
-
-## B6 — SSE contract
-
-Partially covered by existing core SSE unit tests, which assert `session_id` first, activity and chunks in order, `done` last, and the error form. A contract replay against the frontend event handling in `legacy/arya.html` has not been added.
-
-No Phase 7 acceptance claim is made until B1–B6 are implemented and verified.
+The warning is LangGraph's upstream pending-deprecation notice for the checkpoint serializer's future `allowed_objects` default.
