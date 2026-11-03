@@ -35,23 +35,20 @@ if (-not (Test-Path (Join-Path $InstallRoot '.git'))) {
 git -C $InstallRoot fetch origin $PinnedCommit
 git -C $InstallRoot checkout --detach $PinnedCommit
 
-# The pinned upstream release hard-codes 0.0.0.0. Keep its HTTP server on
-# loopback by applying this verified one-line local binding patch.
+# The helper defaults to 0.0.0.0. Use its host option so the launcher controls
+# the address explicitly instead of relying on FastMCP's separate host field.
 $ServerPath = Join-Path $InstallRoot 'src\google_accounts_mcp\server.py'
-$ServerSource = Get-Content $ServerPath -Raw
-$WildcardCount = ([regex]::Matches($ServerSource, 'host="0\.0\.0\.0"')).Count
-$LoopbackCount = ([regex]::Matches($ServerSource, 'host="127\.0\.0\.1"')).Count
-if ($WildcardCount -eq 1) {
-  $ServerSource = $ServerSource.Replace('host="0.0.0.0"', 'host="127.0.0.1"')
-  Set-Content -LiteralPath $ServerPath -Value $ServerSource -NoNewline
-} elseif ($WildcardCount -ne 0 -or $LoopbackCount -ne 1) {
-  throw 'The pinned Google MCP server source no longer matches the expected local-bind patch. Review it before continuing.'
-}
+$ConfigPath = Join-Path $InstallRoot 'src\google_accounts_mcp\config.py'
+$ProjectPython = Join-Path $Root '.venv\Scripts\python.exe'
+if (-not (Test-Path $ProjectPython)) { throw 'Run scripts/sync.ps1 before setting up the Google MCP server.' }
+& $ProjectPython (Join-Path $PSScriptRoot 'patch_google_mcp_host.py') $ConfigPath $ServerPath
+if ($LASTEXITCODE -ne 0) { throw 'Could not apply the Google MCP host-option patch.' }
 
 $env:GOOGLE_CLIENT_ID = $env:GOOGLE_OAUTH_CLIENT_ID
 $env:GOOGLE_CLIENT_SECRET = $env:GOOGLE_OAUTH_CLIENT_SECRET
 $env:MCP_BEARER_TOKEN = $env:GOOGLE_MCP_TOKEN
 $env:PORT = '8321'
+$env:MCP_HOST = '127.0.0.1'
 if (-not $env:GOOGLE_ACCOUNT) { $env:GOOGLE_ACCOUNT = $Account }
 $env:DEFAULT_ACCOUNT = $env:GOOGLE_ACCOUNT
 $env:TOKEN_DB_PATH = $TokenDb

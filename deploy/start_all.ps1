@@ -99,10 +99,11 @@ try {
     throw 'The pinned Google MCP server is not set up. Run scripts/setup_google_mcp.ps1 -Account your-address@example.com first.'
   }
   $GoogleServerPath = Join-Path $GoogleMcpRoot 'src\google_accounts_mcp\server.py'
-  if (-not (Select-String -Path $GoogleServerPath -Pattern 'host="127\.0\.0\.1"' -Quiet)) {
-    throw 'The pinned Google MCP server is not bound to loopback. Run scripts/setup_google_mcp.ps1 to apply the local bind patch.'
+  if (-not (Select-String -Path $GoogleServerPath -Pattern 'host=MCP_HOST' -Quiet)) {
+    throw 'The Google MCP server has no host-option patch. Run scripts/setup_google_mcp.ps1.'
   }
   $env:PORT = $GoogleMcpPort
+  $env:MCP_HOST = '127.0.0.1'
   $env:MCP_BEARER_TOKEN = $env:GOOGLE_MCP_TOKEN
   $env:GOOGLE_CLIENT_ID = $env:GOOGLE_OAUTH_CLIENT_ID
   $env:GOOGLE_CLIENT_SECRET = $env:GOOGLE_OAUTH_CLIENT_SECRET
