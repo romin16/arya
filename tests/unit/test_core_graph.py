@@ -537,6 +537,11 @@ async def test_runtime_start_checks_google_tools_with_mocked_servers(monkeypatch
         schema_checks.append(True)
 
     monkeypatch.setattr(runtime_module, "ensure_schema_current", schema_is_current)
+
+    async def schema_reads_are_valid(pool):
+        schema_checks.append(True)
+
+    monkeypatch.setattr(runtime_module, "validate_schema_reads", schema_reads_are_valid)
     monkeypatch.setattr(runtime_module, "MemoryRepositories", StartupRepositories)
     monkeypatch.setattr(runtime_module, "MultiServerMCPClient", StartupMCPClient)
     startup_model = StartupModel()
@@ -561,7 +566,7 @@ async def test_runtime_start_checks_google_tools_with_mocked_servers(monkeypatch
     }
     assert all(options == {"method": "json_schema", "strict": True} for _, options in startup_model.schemas)
     assert cleanup_calls == [True]
-    assert schema_checks == [True]
+    assert schema_checks == [True, True]
     await runtime.close()
 
 

@@ -57,6 +57,7 @@ from core.tools.native import build_native_tools
 from core.tools.search import SearchService
 from core.tools.weather import WeatherService
 from db.schema_version import ensure_schema_current
+from db.schema_check import validate_schema_reads
 
 ROOT = Path(__file__).resolve().parents[2]
 DEVICE_MCP_URL = "http://127.0.0.1:5002/mcp/"
@@ -807,6 +808,7 @@ class CoreGraphRuntime:
         await self.pool.open(wait=True)
         try:
             await ensure_schema_current(self.pool)
+            await validate_schema_reads(self.pool)
         except Exception:
             await self.pool.close()
             self.pool = None

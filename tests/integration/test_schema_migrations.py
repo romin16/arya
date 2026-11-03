@@ -12,6 +12,7 @@ from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
 from db.apply_schema import MIGRATIONS, apply_migrations
+from db.schema_check import validate_schema_reads
 from core.memory.repositories import MemoryRepositories
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -97,7 +98,22 @@ async def test_phase1_schema_runs_all_memory_store_read_and_write_paths():
                 "INSERT INTO knowledge_chunks(doc_id,chunk_idx,text) VALUES(%s,0,'prior text')", (doc_id,),
             )
             connection.commit()
-            assert apply_migrations(connection, MIGRATIONS) == [2, 3]
+            assert apply_migrations(connection, MIGRATIONS, target_version=2) == [2]
+            connection.commit()
+            probe = AsyncConnectionPool(
+                conninfo=make_conninfo(database_url, options=f"-c search_path={schema},public"),
+                min_size=1,
+                max_size=1,
+                open=False,
+                kwargs={"autocommit": True, "row_factory": dict_row},
+            )
+            await probe.open(wait=True)
+            try:
+                with pytest.raises(RuntimeError, match="knowledge_chunks.title"):
+                    await validate_schema_reads(probe)
+            finally:
+                await probe.close()
+            assert apply_migrations(connection, MIGRATIONS) == [3]
         finally:
             connection.commit()
 
@@ -108,6 +124,7 @@ async def test_phase1_schema_runs_all_memory_store_read_and_write_paths():
     )
     await pool.open(wait=True)
     try:
+        await validate_schema_reads(pool)
         repo = MemoryRepositories(pool)
         vector = [0.0] * 1536
         await repo.upsert_entity("u", "employer", "ARYA Labs")
