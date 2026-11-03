@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import time
 from pathlib import Path
 
 import yaml
@@ -47,10 +48,12 @@ async def evaluate_memory_routing(router, dataset: list[dict]):
             else:
                 examples.append((negative["utterance"], negative.get("operation", "none"), negative.get("store")))
         for utterance, expected, expected_store in examples:
+            started = time.perf_counter()
             decision = await router.ainvoke([
                 SystemMessage(content=prompt),
                 HumanMessage(content=utterance),
             ])
+            latency_ms = (time.perf_counter() - started) * 1000
             intent = getattr(decision, "memory_intent", None)
             reads = getattr(decision, "memory_reads", [])
             store = (reads[0].get("store") if isinstance(reads[0], dict) else getattr(reads[0], "store", None)) if reads else None
@@ -67,11 +70,12 @@ async def evaluate_memory_routing(router, dataset: list[dict]):
                 "expected": expected, "actual": intent,
                 "expected_store": expected_store, "actual_store": store,
                 "reason": reason, "pass": passed,
+                "ttfc_ms": latency_ms,
             })
     return results
 
 
-async def _live_memory_routing(dataset: list[dict]):
+async def _live_memory_routing(dataset: list[dict], model_name: str):
     from dotenv import load_dotenv
     from langchain_openai import ChatOpenAI
     import os
@@ -82,17 +86,20 @@ async def _live_memory_routing(dataset: list[dict]):
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY is required for --live")
-    settings = yaml.safe_load((root / "config" / "models.yaml").read_text(encoding="utf-8"))
     from core.graph.runtime import RouteDecision
 
     router = ChatOpenAI(
-        model=settings["aux"], api_key=api_key, temperature=0,
+        model=model_name, api_key=api_key, temperature=0,
         max_completion_tokens=512, timeout=30, max_retries=1,
-    ).with_structured_output(RouteDecision, method="json_schema", strict=True)
-    return await evaluate_memory_routing(router, dataset)
+    )
+    try:
+        structured_router = router.with_structured_output(RouteDecision, method="json_schema", strict=True)
+        return await evaluate_memory_routing(structured_router, dataset)
+    finally:
+        await router.root_async_client.close()
 
 
-async def _live_approvals(dataset: list[dict]):
+async def _live_approvals(dataset: list[dict], model_name: str):
     """Run real model selections through the core graph's policy interrupt; all tools are inert mocks."""
     import os
     import httpx
@@ -238,7 +245,7 @@ async def _live_approvals(dataset: list[dict]):
     authorized_token = vault.tokenise(account)
     http_client = httpx.AsyncClient(event_hooks={"request": [_scan_openai_payload(vault)]}, timeout=40)
     main_model = ChatOpenAI(
-        model=yaml.safe_load((root / "config" / "models.yaml").read_text(encoding="utf-8"))["main"],
+        model=model_name,
         api_key=api_key,
         temperature=0,
         max_retries=1,
@@ -286,9 +293,15 @@ async def _live_approvals(dataset: list[dict]):
         request_text = case["utterance"]
         if case["id"] == "email_to_self":
             request_text = request_text.replace("myself", "myself")
-        events = [event async for event in runtime.stream_turn(
+        started = time.perf_counter()
+        first_chunk_ms = None
+        events = []
+        async for event in runtime.stream_turn(
             type("ChatRequest", (), {"message": request_text, "user_id": user_id})(), session,
-        )]
+        ):
+            if first_chunk_ms is None and "chunk" in event:
+                first_chunk_ms = (time.perf_counter() - started) * 1000
+            events.append(event)
         snapshot = await runtime.graph.aget_state({"configurable": {"thread_id": session}})
         selected = list(snapshot.values.get("chosen_tools", []))
         interrupt_events = [event for event in events if event.get("activity", {}).get("event") == "Approval"]
@@ -308,13 +321,14 @@ async def _live_approvals(dataset: list[dict]):
             "expected_interrupt": case["interrupt"],
             "actual_interrupt": bool(interrupt_events),
             "approval_content_check": content_check,
+            "ttfc_ms": first_chunk_ms or (time.perf_counter() - started) * 1000,
             "pass": bool(selected and selected[0] == case["tool"] and bool(interrupt_events) == case["interrupt"] and content_check),
         })
     await http_client.aclose()
     return results
 
 
-async def _live_structured_schemas():
+async def _live_structured_schemas(model_name: str):
     import os
     from dotenv import load_dotenv
     from langchain_openai import ChatOpenAI
@@ -326,78 +340,295 @@ async def _live_structured_schemas():
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY is required for --suite structured-schemas --live")
-    model_settings = yaml.safe_load((root / "config" / "models.yaml").read_text(encoding="utf-8"))
     prompts = {
         "RouteDecision": "Route 'What time is it?' with no skills, no memory reads, and no memory intent.",
         "ApprovalClassification": "The user replied 'I am not sure' to an approval question. Classify as unclear.",
         "MemoryWrite": "Extract memories from 'What time is it?'. Return empty stores and no episode.",
     }
     llm = ChatOpenAI(
-        model=model_settings["aux"], api_key=api_key, temperature=0,
+        model=model_name, api_key=api_key, temperature=0,
         max_completion_tokens=512, timeout=30, max_retries=1,
     )
     results = []
-    for schema in STRUCTURED_OUTPUT_MODELS:
-        runnable = llm.with_structured_output(schema, method="json_schema", strict=True)
-        output = await runnable.ainvoke(prompts[schema.__name__])
-        results.append({"schema": schema.__name__, "valid": isinstance(output, schema)})
-    return results
+    try:
+        for schema in STRUCTURED_OUTPUT_MODELS:
+            started = time.perf_counter()
+            runnable = llm.with_structured_output(schema, method="json_schema", strict=True)
+            output = await runnable.ainvoke(prompts[schema.__name__])
+            results.append({
+                "schema": schema.__name__, "valid": isinstance(output, schema),
+                "ttfc_ms": (time.perf_counter() - started) * 1000,
+                "pass": isinstance(output, schema),
+            })
+        return results
+    finally:
+        await llm.root_async_client.close()
+
+
+async def _live_tool_routing(dataset: list[dict], model_name: str):
+    import os
+    from dotenv import load_dotenv
+    from langchain_core.messages import HumanMessage, SystemMessage, AIMessageChunk
+    from langchain_core.tools import StructuredTool
+    from langchain_openai import ChatOpenAI
+    from pydantic import Field, create_model
+
+    root = Path(__file__).resolve().parents[1]
+    load_dotenv(root / ".env")
+    os.environ["LANGFUSE_TRACING_ENABLED"] = "false"
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY is required for --live")
+    skills = __import__("core.skills_runtime", fromlist=["SkillsRuntime"]).SkillsRuntime(root / "skills")
+
+    tool_fields = {
+        "spotify_play": {"query": (str, Field(description="Track or artist to play"))},
+        "spotify_pause": {}, "spotify_resume": {}, "spotify_next": {},
+        "open_app": {"app": (str, Field(description="Application to open"))},
+        "close_app": {"app": (str, Field(description="Application to close"))},
+        "whatsapp_send": {
+            "contact": (str, Field(description="Contact name")),
+            "message": (str, Field(description="Message content")),
+        },
+        "gmail_send": {
+            "to": (list[str], Field(description="Recipient addresses")),
+            "subject": (str, Field(description="Email subject")),
+            "body": (str, Field(description="Email body")),
+        },
+        "calendar_create": {
+            "summary": (str, Field(description="Event title")),
+            "start": (str, Field(description="Start time")),
+            "end": (str, Field(description="End time")),
+        },
+        "contacts_search": {"query": (str, Field(description="Contact search query"))},
+        "get_weather": {"location": (str, Field(description="Location"))},
+        "web_search": {"query": (str, Field(description="Search query"))},
+    }
+    descriptions = {
+        "spotify_play": "Play the requested track or artist in Spotify.",
+        "spotify_pause": "Pause current Spotify playback.",
+        "spotify_resume": "Resume paused Spotify playback.",
+        "spotify_next": "Skip to the next Spotify track.",
+        "open_app": "Open the requested desktop app.",
+        "close_app": "Close the requested desktop app.",
+        "whatsapp_send": "Send the requested WhatsApp message to the named contact; approval is handled in code.",
+        "gmail_send": "Send the requested email; approval is handled in code.",
+        "calendar_create": "Create the requested calendar event; approval is handled in code.",
+        "contacts_search": "Search Google Contacts for a person.",
+        "get_weather": "Get current weather for a location.",
+        "web_search": "Search the web for current information.",
+    }
+    skill_tools = {
+        "spotify": ["spotify_play", "spotify_pause", "spotify_resume", "spotify_next"],
+        "desktop": ["open_app", "close_app"],
+        "whatsapp": ["whatsapp_send"],
+        "email": ["gmail_send"],
+        "calendar": ["calendar_create"],
+        "contacts": ["contacts_search"],
+        "weather-search": ["get_weather", "web_search"],
+    }
+
+    async def inert_tool(**_arguments):
+        return {"success": True, "mocked": True}
+
+    tools = {}
+    for name, fields in tool_fields.items():
+        schema = create_model(f"{name.title().replace('_', '')}EvalArgs", **fields)
+        tools[name] = StructuredTool.from_function(
+            coroutine=inert_tool, name=name, description=descriptions[name], args_schema=schema,
+        )
+
+    model = ChatOpenAI(model=model_name, api_key=api_key, temperature=0, timeout=40, max_retries=1)
+    results = []
+    try:
+        for case in dataset:
+            selected_tools = [tools[name] for name in skill_tools[case["skill"]]]
+            skill_text = skills.load(case["skill"], [case["skill"]])[0]
+            last_action = case.get("last_action")
+            prompt = (
+            "Select and call exactly one tool for the user's current request. Do not execute it or claim success. "
+            "Use only the active skill and available tools. For a short reference, resolve it from the supplied last action.\n\n"
+            f"Active skill instructions:\n{skill_text}\n\n"
+            f"Last action: {json.dumps(last_action, ensure_ascii=False) if last_action else 'none'}"
+            )
+            started = time.perf_counter()
+            first_chunk_ms = None
+            combined = None
+            bound = model.bind_tools(selected_tools, tool_choice="required")
+            async for chunk in bound.astream([
+                SystemMessage(content=prompt), HumanMessage(content=case["utterance"]),
+            ]):
+                if first_chunk_ms is None:
+                    first_chunk_ms = (time.perf_counter() - started) * 1000
+                combined = chunk if combined is None else combined + chunk
+            if not isinstance(combined, AIMessageChunk):
+                results.append({
+                    "id": case["id"], "expected": case["tool"], "actual": "none",
+                    "ttfc_ms": first_chunk_ms or (time.perf_counter() - started) * 1000, "pass": False,
+                })
+                continue
+            calls = combined.tool_calls or []
+            actual = calls[0]["name"] if calls else "none"
+            results.append({
+                "id": case["id"], "expected": case["tool"], "actual": actual,
+                "ttfc_ms": first_chunk_ms or (time.perf_counter() - started) * 1000,
+                "pass": actual == case["tool"],
+            })
+        return results
+    finally:
+        await model.root_async_client.close()
+
+
+async def _live_text_suite(dataset: list[dict], model_name: str, *, persona: bool):
+    import os
+    from dotenv import load_dotenv
+    from langchain_core.messages import HumanMessage, SystemMessage
+    from langchain_openai import ChatOpenAI
+
+    root = Path(__file__).resolve().parents[1]
+    load_dotenv(root / ".env")
+    os.environ["LANGFUSE_TRACING_ENABLED"] = "false"
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY is required for --live")
+    model = ChatOpenAI(model=model_name, api_key=api_key, temperature=0, timeout=40, max_retries=1)
+    results = []
+    try:
+        for index, case in enumerate(dataset):
+            if persona:
+                system = (
+                    f"You are ARYA. Follow this persona:\n{(root / 'persona.md').read_text(encoding='utf-8')}\n"
+                    "Answer briefly and do not claim to have executed actions. Avoid the phrases 'Sure!', 'Of course!', and 'Enjoy!'."
+                )
+                user = f"Write a concise chat response for this request.\nUser: {case['utterance']}"
+            else:
+                system = "Follow the user's harmless request for exact output. Return only the requested text."
+                user = case["utterance"]
+            started = time.perf_counter()
+            first_chunk_ms = None
+            chunks = []
+            async for chunk in model.astream([SystemMessage(content=system), HumanMessage(content=user)]):
+                if first_chunk_ms is None:
+                    first_chunk_ms = (time.perf_counter() - started) * 1000
+                if isinstance(chunk.content, str):
+                    chunks.append(chunk.content)
+            reply = "".join(chunks).strip()
+            if persona:
+                lowered = reply.casefold()
+                passed = not any(phrase in lowered for phrase in ("sure!", "of course!", "enjoy!"))
+            else:
+                passed = reply == case["expected_reply"].strip()
+            results.append({
+                "id": case.get("id", str(index + 1)), "reply": reply,
+                "ttfc_ms": first_chunk_ms or (time.perf_counter() - started) * 1000,
+                "pass": passed,
+            })
+        return results
+    finally:
+        await model.root_async_client.close()
+
+
+SUITES = (
+    "tool-routing", "memory-routing", "approvals", "persona-tone", "exact-reply", "structured-schemas",
+)
+
+
+def _percentile(values: list[float], percent: float) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    index = min(len(ordered) - 1, max(0, int(round((len(ordered) - 1) * percent))))
+    return ordered[index]
+
+
+def _suite_cases(dataset_dir: Path, suite: str) -> list[dict]:
+    if suite == "structured-schemas":
+        from core.graph.runtime import STRUCTURED_OUTPUT_MODELS
+
+        return [{"id": schema.__name__} for schema in STRUCTURED_OUTPUT_MODELS]
+    return yaml.safe_load((dataset_dir / f"{suite}.yaml").read_text(encoding="utf-8"))
+
+
+def _case_count(suite: str, dataset: list[dict]) -> int:
+    if suite == "memory-routing":
+        return sum(
+            len(case.get("utterances", [])) + len(case.get("negatives", []))
+            for case in dataset
+        )
+    return len(dataset)
+
+
+async def _run_live_suite(suite: str, dataset: list[dict], model_name: str) -> list[dict]:
+    if suite == "tool-routing":
+        return await _live_tool_routing(dataset, model_name)
+    if suite == "memory-routing":
+        return await _live_memory_routing(dataset, model_name)
+    if suite == "approvals":
+        return await _live_approvals(dataset, model_name)
+    if suite == "persona-tone":
+        return await _live_text_suite(dataset, model_name, persona=True)
+    if suite == "exact-reply":
+        return await _live_text_suite(dataset, model_name, persona=False)
+    if suite == "structured-schemas":
+        return await _live_structured_schemas(model_name)
+    raise ValueError(f"Unknown eval suite: {suite}")
+
+
+async def _run_live_comparison(suites: list[str], datasets: dict[str, list[dict]], models: list[str]) -> list[dict]:
+    table = []
+    for model_name in models:
+        for suite in suites:
+            rows = await _run_live_suite(suite, datasets[suite], model_name)
+            passed = sum(bool(row.get("pass", row.get("valid", False))) for row in rows)
+            latencies = [float(row.get("ttfc_ms", 0)) for row in rows]
+            table.append({
+                "suite": suite, "model": model_name, "passed": passed, "total": len(rows),
+                "rate": passed / len(rows) if rows else 0,
+                "p50": _percentile(latencies, 0.50), "p95": _percentile(latencies, 0.95),
+                "failures": [row for row in rows if not row.get("pass", row.get("valid", False))],
+            })
+    return table
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--models", default="gpt-4o,gpt-4o-mini")
-    parser.add_argument("--suite", default="all")
-    parser.add_argument("--live", action="store_true", help="Use the configured OpenAI model for a live eval suite")
+    parser.add_argument("--suite", choices=("all", *SUITES), default="all")
+    parser.add_argument("--live", action="store_true", help="Call OpenAI for the selected eval suites")
     args = parser.parse_args()
     dataset_dir = Path(__file__).parent / "datasets"
-    if args.suite == "approvals":
-        dataset = yaml.safe_load((dataset_dir / "approvals.yaml").read_text(encoding="utf-8"))
-        if not args.live:
-            print(f"Loaded {len(dataset)} cases for suite approvals; no model calls were made.")
-            return
-        results = asyncio.run(_live_approvals(dataset))
-        print("case\texpected tool\tselected tool\texpected interrupt\tactual interrupt\tresult")
-        for result in results:
-            print(
-                f"{result['id']}\t{result['expected']}\t{result['actual']}\t"
-                f"{result['expected_interrupt']}\t{result['actual_interrupt']}\t"
-                f"{'PASS' if result['pass'] else 'FAIL'}"
-            )
-        print(f"approvals: {sum(row['pass'] for row in results)}/{len(results)} pass")
-        raise SystemExit(0 if all(row["pass"] for row in results) else 1)
-    if args.suite == "structured-schemas":
-        from core.graph.runtime import STRUCTURED_OUTPUT_MODELS
+    suites = list(SUITES) if args.suite == "all" else [args.suite]
+    models = [item.strip() for item in args.models.split(",") if item.strip()]
+    if not models:
+        parser.error("--models must contain at least one model name")
 
-        if not args.live:
-            print(f"Loaded {len(STRUCTURED_OUTPUT_MODELS)} strict structured-output schemas; no model calls were made.")
-            return
-        results = asyncio.run(_live_structured_schemas())
-        print("schema\tresult")
-        for result in results:
-            print(f"{result['schema']}\t{'PASS' if result['valid'] else 'FAIL'}")
-        print(f"structured-schemas: {sum(row['valid'] for row in results)}/{len(results)} pass")
-        raise SystemExit(0 if all(row["valid"] for row in results) else 1)
-    selected = [dataset_dir / "memory-routing.yaml"] if args.suite == "memory-routing" else list(dataset_dir.glob("*.yaml"))
-    datasets = [yaml.safe_load(path.read_text(encoding="utf-8")) for path in selected]
-    cases = sum(sum(len(row.get("utterances", [row.get("utterance", "")])) + len(row.get("negatives", [])) for row in data)
-                if isinstance(data, list) else len(data) for data in datasets)
-    if args.live:
-        if args.suite == "memory-routing":
-            results = asyncio.run(_live_memory_routing(datasets[0]))
-        else:
-            parser.error("--live supports only --suite memory-routing or --suite approvals")
-        failures = [result for result in results if not result["pass"]]
-        for result in results:
-            status = "PASS" if result["pass"] else "FAIL"
-            print(
-                f"{status}\t{result['id']}\t{result['expected']}\t{result['actual']}\t"
-                f"{result['expected_store'] or '-'}\t{result['actual_store'] or '-'}\t"
-                f"{result['reason'] or '-'}\t{result['utterance']}"
-            )
-        print(f"memory-routing: {len(results)-len(failures)}/{len(results)} pass")
-        raise SystemExit(1 if failures else 0)
-    print(f"Loaded {cases} cases for suite {args.suite}; no model calls were made.")
+    datasets = {suite: _suite_cases(dataset_dir, suite) for suite in suites}
+    if not args.live:
+        print("suite\tmodel\tcases\tpass_rate\tp50_ttfc_ms\tp95_ttfc_ms")
+        for suite in suites:
+            for model in models:
+                print(f"{suite}\t{model}\t{_case_count(suite, datasets[suite])}\tnot-run\t-\t-")
+        print("Offline mode loaded all selected datasets; pass --live to evaluate OpenAI models.")
+        return
+
+    table = asyncio.run(_run_live_comparison(suites, datasets, models))
+    print("suite\tmodel\tpass_rate\tp50_ttfc_ms\tp95_ttfc_ms")
+    for row in table:
+        print(
+            f"{row['suite']}\t{row['model']}\t{row['passed']}/{row['total']} ({row['rate']:.1%})\t"
+            f"{row['p50']:.1f}\t{row['p95']:.1f}"
+        )
+    failures = [failure for row in table for failure in row["failures"]]
+    if failures:
+        print("failed_cases\tsuite\tmodel\tcase\texpected\tactual\tdetail")
+        for row in table:
+            for failure in row["failures"]:
+                print(
+                    f"FAIL\t{row['suite']}\t{row['model']}\t{failure.get('id', '-')}	"
+                    f"{failure.get('expected', '-')}	{failure.get('actual', '-')}	"
+                    f"{failure.get('reason', '-')}: {failure.get('utterance', failure.get('reply', '-'))}"
+                )
+    raise SystemExit(0 if all(row["passed"] == row["total"] for row in table) else 1)
 
 
 if __name__ == "__main__":

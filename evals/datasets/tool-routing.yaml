@@ -1,15 +1,64 @@
-- utterance: Pause Spotify
-  tool: spotify_pause
-- utterance: Resume Spotify
-  tool: spotify_resume
-- utterance: Play Daft Punk
+- id: spotify_play
+  utterance: Play Daft Punk.
+  skill: spotify
   tool: spotify_play
-- utterance: Open VS Code
+- id: spotify_pause
+  utterance: Pause Spotify.
+  skill: spotify
+  tool: spotify_pause
+- id: spotify_resume
+  utterance: Resume Spotify.
+  skill: spotify
+  tool: spotify_resume
+- id: spotify_next
+  utterance: Play the next Spotify song.
+  skill: spotify
+  tool: spotify_next
+- id: open_app
+  utterance: Open VS Code.
+  skill: desktop
   tool: open_app
-- utterance: Send Neha a WhatsApp message saying I am late
+- id: close_app
+  utterance: Close Notepad.
+  skill: desktop
+  tool: close_app
+- id: whatsapp_contact
+  utterance: Message Test Contact on WhatsApp saying the meeting moved to 3.
+  skill: whatsapp
   tool: whatsapp_send
-  approval: required
-- utterance: What is the weather in Mumbai?
+- id: email_send
+  utterance: Send an email to Test Contact saying the meeting moved to 3.
+  skill: email
+  tool: gmail_send
+- id: calendar_create
+  utterance: Create a calendar event called Design Review tomorrow at 3 PM.
+  skill: calendar
+  tool: calendar_create
+- id: contacts_search
+  utterance: Search my contacts for Test Contact.
+  skill: contacts
+  tool: contacts_search
+- id: weather
+  utterance: What is the weather in Mumbai?
+  skill: weather-search
   tool: get_weather
-- utterance: Search the web for pgvector
+- id: web_search
+  utterance: Search the web for pgvector.
+  skill: weather-search
   tool: web_search
+- id: pause_reference
+  utterance: Pause it.
+  skill: spotify
+  tool: spotify_pause
+  last_action:
+    tool: spotify_play
+    args:
+      query: lofi hip hop
+- id: repeat_reference
+  utterance: Do it again.
+  skill: spotify
+  tool: spotify_play
+  last_action:
+    tool: spotify_play
+    args:
+      query: lofi hip hop
