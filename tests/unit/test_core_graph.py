@@ -153,6 +153,27 @@ async def test_sse_connection_failures_use_assistant_services_message():
 
 
 @pytest.mark.asyncio
+async def test_stream_turn_rewrites_banned_persona_phrase(monkeypatch):
+    runtime = CoreGraphRuntime()
+    runtime.vault = PIIVault(b"persona-stream-guard", Fernet.generate_key())
+
+    class ReplyGraph:
+        async def astream(self, graph_input, config, stream_mode):
+            assert stream_mode == "custom"
+            yield {"kind": "token", "text": "Enjoy"}
+            yield {"kind": "token", "text": " the mellow beats!"}
+
+    runtime.graph = ReplyGraph()
+    monkeypatch.setattr(runtime_module, "langfuse_trace_config", lambda **kwargs: {})
+    events = [event async for event in runtime.stream_turn(
+        SimpleNamespace(message="Play lofi hip hop", user_id="persona-user"),
+        "persona-thread",
+    )]
+    reply = "".join(event["chunk"] for event in events if "chunk" in event)
+    assert reply == "Try the mellow beats!"
+
+
+@pytest.mark.asyncio
 async def test_programmatic_approve_endpoint_forwards_decision_and_edits():
     class ApprovalRuntime:
         async def resume_approval(self, thread_id, decision, edited_args=None):

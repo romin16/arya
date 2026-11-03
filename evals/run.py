@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import re
 import time
 from pathlib import Path
 
@@ -514,8 +515,7 @@ async def _live_text_suite(dataset: list[dict], model_name: str, *, persona: boo
                     chunks.append(chunk.content)
             reply = "".join(chunks).strip()
             if persona:
-                lowered = reply.casefold()
-                passed = not any(phrase in lowered for phrase in ("sure!", "of course!", "enjoy!"))
+                passed = re.search(r"\b(?:sure|of\s+course|certainly|enjoy)\b", reply, re.I) is None
             else:
                 passed = reply == case["expected_reply"].strip()
             results.append({

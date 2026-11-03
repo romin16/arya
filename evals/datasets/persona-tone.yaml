@@ -4,3 +4,5 @@
   expected_tone: concise, human, lightly opinionated
 - utterance: Message John that the meeting moved to 3.
   expected_tone: task-first with at most one relevant follow-up
+- utterance: Play lofi hip hop.
+  expected_tone: task-first, with no generic closing or banned phrase

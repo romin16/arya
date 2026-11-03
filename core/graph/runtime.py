@@ -42,6 +42,7 @@ from core.graph.action_logger import (
 from core.memory.normalization import explicit_user_rules
 from core.memory.repositories import MemoryRepositories
 from core.memory.service import MemoryService
+from core.persona import PersonaReplyGuard
 from core.observability import langfuse_trace_config
 from core.memory.policy_gate import hard_rule_for
 from core.policy_gate import ToolPolicy
@@ -1941,6 +1942,7 @@ class CoreGraphRuntime:
         if self.graph is None or self.vault is None:
             raise RuntimeError("Core graph is not initialized")
         stream_detokenizer = StreamingDetokenizer(self.vault)
+        persona_guard = PersonaReplyGuard()
         user_id = self.vault.tokenise(request.user_id or getattr(self, "user_id", "arya-local"))
         pending_operation = None
         repositories = getattr(self.memory, "repositories", None)
@@ -1984,10 +1986,13 @@ class CoreGraphRuntime:
                 elif event.get("kind") == "token":
                     chunk = stream_detokenizer.feed(str(event.get("text", "")))
                     if chunk:
-                        yield {"chunk": chunk}
+                        safe_chunk = persona_guard.feed(chunk)
+                        if safe_chunk:
+                            yield {"chunk": safe_chunk}
             remaining = stream_detokenizer.feed("", final=True)
-            if remaining:
-                yield {"chunk": remaining}
+            final_chunk = persona_guard.feed(remaining, final=True)
+            if final_chunk:
+                yield {"chunk": final_chunk}
 
         if pending_operation and pending_operation.get("operation_type") == "tool_approval":
             expired = pending_operation["expires_at"] <= datetime.now(timezone.utc)
