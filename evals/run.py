@@ -386,6 +386,8 @@ async def _live_tool_routing(dataset: list[dict], model_name: str):
         "spotify_play": {"query": (str, Field(description="Track or artist to play"))},
         "spotify_pause": {}, "spotify_resume": {}, "spotify_next": {},
         "open_app": {"app": (str, Field(description="Application to open"))},
+        "open_url": {"url": (str, Field(description="External HTTP or HTTPS URL"))},
+        "youtube_search": {"query": (str, Field(description="YouTube search query"))},
         "close_app": {"app": (str, Field(description="Application to close"))},
         "whatsapp_send": {
             "contact": (str, Field(description="Contact name")),
@@ -410,7 +412,9 @@ async def _live_tool_routing(dataset: list[dict], model_name: str):
         "spotify_pause": "Pause current Spotify playback.",
         "spotify_resume": "Resume paused Spotify playback.",
         "spotify_next": "Skip to the next Spotify track.",
-        "open_app": "Open the requested desktop app.",
+        "open_app": "Open a known desktop application only. Unknown app names will fail; do not open websites with this tool.",
+        "open_url": "Open an external HTTP or HTTPS page in the default browser.",
+        "youtube_search": "Open YouTube search results for the requested query.",
         "close_app": "Close the requested desktop app.",
         "whatsapp_send": "Send the requested WhatsApp message to the named contact; approval is handled in code.",
         "gmail_send": "Send the requested email; approval is handled in code.",
@@ -421,7 +425,7 @@ async def _live_tool_routing(dataset: list[dict], model_name: str):
     }
     skill_tools = {
         "spotify": ["spotify_play", "spotify_pause", "spotify_resume", "spotify_next"],
-        "desktop": ["open_app", "close_app"],
+        "desktop": ["open_app", "open_url", "youtube_search", "close_app"],
         "whatsapp": ["whatsapp_send"],
         "email": ["gmail_send"],
         "calendar": ["calendar_create"],
@@ -429,14 +433,22 @@ async def _live_tool_routing(dataset: list[dict], model_name: str):
         "weather-search": ["get_weather", "web_search"],
     }
 
-    async def inert_tool(**_arguments):
-        return {"success": True, "mocked": True}
+    def mocked_tool(name: str):
+        async def inert_tool(**arguments):
+            if name == "open_app":
+                app_name = str(arguments.get("app", "")).casefold().replace(" ", "")
+                known = {"notepad", "chrome", "firefox", "edge", "spotify", "vscode", "visualstudiocode"}
+                if app_name not in known:
+                    return {"success": False, "verified": False, "message": f"unknown app: {app_name}"}
+                return {"success": True, "verified": True, "mocked": True}
+            return {"success": True, "mocked": True}
+        return inert_tool
 
     tools = {}
     for name, fields in tool_fields.items():
         schema = create_model(f"{name.title().replace('_', '')}EvalArgs", **fields)
         tools[name] = StructuredTool.from_function(
-            coroutine=inert_tool, name=name, description=descriptions[name], args_schema=schema,
+            coroutine=mocked_tool(name), name=name, description=descriptions[name], args_schema=schema,
         )
 
     model = ChatOpenAI(model=model_name, api_key=api_key, temperature=0, timeout=40, max_retries=1)
@@ -470,10 +482,28 @@ async def _live_tool_routing(dataset: list[dict], model_name: str):
                 continue
             calls = combined.tool_calls or []
             actual = calls[0]["name"] if calls else "none"
+            result = None
+            args_pass = True
+            tool_result_pass = True
+            if calls:
+                selected_args = calls[0].get("args", {})
+                args_pass = all(
+                    selected_args.get(key) == value
+                    for key, value in case.get("expected_args", {}).items()
+                )
+                if "expected_tool_result" in case:
+                    result = await tools[actual].ainvoke(selected_args)
+                    tool_result_pass = all(
+                        result.get(key) == value
+                        for key, value in case["expected_tool_result"].items()
+                    )
             results.append({
                 "id": case["id"], "expected": case["tool"], "actual": actual,
                 "ttfc_ms": first_chunk_ms or (time.perf_counter() - started) * 1000,
-                "pass": actual == case["tool"],
+                "pass": actual == case["tool"] and args_pass and tool_result_pass,
+                "reason": "tool argument mismatch" if not args_pass else (
+                    "mock tool result mismatch" if not tool_result_pass else ""
+                ),
             })
         return results
     finally:

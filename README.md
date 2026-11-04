@@ -33,6 +33,11 @@ actions because those actions control the active Windows desktop.
 - A verifier that checks action and memory claims against actual tool outcomes.
 - Optional Langfuse traces with PII-tokenised content.
 
+## Status
+
+ARYA has migrated from n8n to LangGraph. Advanced browser automation—shopping
+carts, forms, and multi-step web tasks—is in progress and has not been ported.
+
 ### Memory and privacy
 
 Memory uses five PostgreSQL stores: versioned entities, episodes, knowledge

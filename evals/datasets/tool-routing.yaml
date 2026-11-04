@@ -18,6 +18,29 @@
   utterance: Open VS Code.
   skill: desktop
   tool: open_app
+- id: open_app_notepad
+  utterance: Open Notepad.
+  skill: desktop
+  tool: open_app
+- id: open_unknown_app
+  utterance: Open flibberjabber.
+  skill: desktop
+  tool: open_app
+  expected_args:
+    app: flibberjabber
+  expected_tool_result:
+    success: false
+    verified: false
+- id: youtube_search
+  utterance: Open YouTube and search for lofi hip hop.
+  skill: desktop
+  tool: youtube_search
+  expected_args:
+    query: lofi hip hop
+- id: open_url
+  utterance: Open github.com.
+  skill: desktop
+  tool: open_url
 - id: close_app
   utterance: Close Notepad.
   skill: desktop
