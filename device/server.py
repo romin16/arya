@@ -2,10 +2,17 @@
 from __future__ import annotations
 
 import hmac
+import ipaddress
 import os
+import csv
+import re
+import subprocess
 import sys
+import time
+import webbrowser
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlencode, urlsplit
 from mcp.server.fastmcp import FastMCP
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
@@ -47,6 +54,147 @@ desktop = DesktopAgent()
 whatsapp = WhatsAppAgent()
 vscode = VSCodeAgent()
 spotify_playing: bool | None = None
+
+KNOWN_APPS = {
+    "chrome", "firefox", "edge", "spotify", "vscode", "whatsapp", "calculator",
+    "notepad", "explorer", "discord", "telegram", "notes", "finder", "files",
+}
+APP_PATHS = dict(getattr(getattr(desktop, "app_controller", None), "app_paths", {}) or {})
+APP_VERIFY_TIMEOUT_SECONDS = float(os.getenv("DEVICE_APP_VERIFY_SECONDS", "3"))
+APP_PROCESS_NAMES = {
+    "chrome": {"chrome.exe"}, "firefox": {"firefox.exe"}, "edge": {"msedge.exe"},
+    "spotify": {"spotify.exe"}, "vscode": {"code.exe"}, "whatsapp": {"whatsapp.exe"},
+    "calculator": {"calculator.exe", "calculatorapp.exe"}, "notepad": {"notepad.exe"},
+    "explorer": {"explorer.exe"}, "discord": {"discord.exe"}, "telegram": {"telegram.exe"},
+}
+WINDOW_TITLES = {
+    "vscode": ("visual studio code", "code"),
+    "edge": ("microsoft edge", "edge"),
+    "chrome": ("google chrome", "chrome"),
+}
+
+
+def _normalise_app_name(app: str) -> str:
+    compact = re.sub(r"[^a-z0-9]", "", app.casefold())
+    return {"visualstudiocode": "vscode", "vs code": "vscode", "microsoftedge": "edge"}.get(
+        compact, compact,
+    )
+
+
+def _app_process_names(app_key: str) -> set[str]:
+    names = set(APP_PROCESS_NAMES.get(app_key, set()))
+    configured = next(
+        (str(value) for key, value in APP_PATHS.items() if _normalise_app_name(key) == app_key),
+        "",
+    )
+    match = re.search(r"([^\\/\s\"']+\.exe)\b", configured, re.IGNORECASE)
+    if match:
+        names.add(match.group(1).casefold())
+    return names
+
+
+def _app_is_running(app_key: str) -> bool:
+    expected = _app_process_names(app_key)
+    try:
+        process_list = subprocess.run(
+            ["tasklist", "/FO", "CSV", "/NH"], capture_output=True, text=True,
+            timeout=1, check=False,
+        )
+        if process_list.returncode == 0:
+            for row in csv.reader(process_list.stdout.splitlines()):
+                if row and row[0].casefold() in expected:
+                    return True
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+    aliases = WINDOW_TITLES.get(app_key, (app_key,))
+    try:
+        import win32gui
+
+        found = False
+
+        def inspect_window(hwnd, _extra):
+            nonlocal found
+            if win32gui.IsWindowVisible(hwnd):
+                title = win32gui.GetWindowText(hwnd).casefold()
+                found = found or any(alias in title for alias in aliases)
+
+        win32gui.EnumWindows(inspect_window, None)
+        return found
+    except (ImportError, AttributeError, OSError):
+        return False
+
+
+def _launch_and_verify_app(app: str) -> dict[str, Any]:
+    app_key = _normalise_app_name(app)
+    configured_names = {_normalise_app_name(name): name.casefold() for name in APP_PATHS}
+    known = KNOWN_APPS | set(configured_names)
+    if app_key not in known:
+        choices = ", ".join(sorted(known))
+        return {
+            "success": False,
+            "verified": False,
+            "attempted": False,
+            "message": f"unknown app: {app}, I can open: {choices}",
+        }
+
+    launcher_name = configured_names.get(app_key, app_key)
+    result = desktop.open_app(launcher_name)
+    if not isinstance(result, dict):
+        result = {"success": False, "message": "The app launcher returned an invalid result."}
+    if result.get("success") is False:
+        return {**result, "success": False, "verified": False, "attempted": True}
+
+    deadline = time.monotonic() + APP_VERIFY_TIMEOUT_SECONDS
+    while True:
+        if _app_is_running(app_key):
+            return {**result, "success": True, "verified": True, "attempted": True}
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(0.2)
+    return {
+        **result,
+        "success": False,
+        "verified": False,
+        "attempted": True,
+        "message": "I tried, but I couldn't confirm it opened.",
+    }
+
+
+def _validate_http_url(url: str) -> str:
+    value = url.strip()
+    try:
+        parsed = urlsplit(value)
+    except ValueError as exc:
+        raise ValueError("url must be an external http or https URL") from exc
+    try:
+        address = ipaddress.ip_address(parsed.hostname) if parsed.hostname else None
+    except ValueError:
+        address = None
+    if (
+        parsed.scheme.casefold() not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.hostname.casefold() == "localhost"
+        or parsed.hostname.casefold().endswith((".local", ".internal"))
+        or (address is not None and not address.is_global)
+        or "\\" in value
+    ):
+        raise ValueError("url must be an external http or https URL")
+    return value
+
+
+def _dispatch_browser_url(url: str) -> dict[str, Any]:
+    try:
+        opened = bool(webbrowser.open(url, new=2))
+    except Exception as exc:
+        return {"success": False, "verified": False, "message": f"Browser did not open the URL: {exc}"}
+    return {
+        "success": opened,
+        "verified": opened,
+        "message": "Browser accepted the URL." if opened else "The default browser did not confirm it opened.",
+    }
 
 mcp = FastMCP(
     "arya-device",
@@ -104,8 +252,24 @@ async def spotify_previous() -> dict[str, Any]:
 
 @mcp.tool()
 async def open_app(app: str) -> dict[str, Any]:
-    """Open a desktop application by name."""
-    return await queue.run(desktop.open_app, app)
+    """Open a known desktop application. Websites and URLs are not applications."""
+    return await queue.run(_launch_and_verify_app, app)
+
+
+@mcp.tool()
+async def open_url(url: str) -> dict[str, Any]:
+    """Open an external HTTP or HTTPS URL in the default browser."""
+    safe_url = _validate_http_url(url)
+    return await queue.run(_dispatch_browser_url, safe_url)
+
+
+@mcp.tool()
+async def youtube_search(query: str) -> dict[str, Any]:
+    """Open YouTube search results in the default browser."""
+    if not query.strip():
+        raise ValueError("query must not be empty")
+    url = "https://www.youtube.com/results?" + urlencode({"search_query": query.strip()})
+    return await queue.run(_dispatch_browser_url, url)
 
 
 @mcp.tool()

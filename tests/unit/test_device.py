@@ -165,7 +165,7 @@ def test_fastmcp_registers_typed_device_tools_and_mocked_win32_focus(monkeypatch
     names = {tool.name for tool in tools}
     assert names == {
         "spotify_play", "spotify_pause", "spotify_resume", "spotify_next", "spotify_previous",
-        "open_app", "close_app", "set_volume", "type_text", "take_screenshot", "lock_screen",
+        "open_app", "open_url", "youtube_search", "close_app", "set_volume", "type_text", "take_screenshot", "lock_screen",
         "open_downloads", "open_documents", "whatsapp_send",
         "whatsapp_voice_call", "vscode_open", "vscode_open_file", "vscode_search",
         "vscode_run_command", "vscode_format",
@@ -184,6 +184,8 @@ def test_fastmcp_registers_typed_device_tools_and_mocked_win32_focus(monkeypatch
 async def test_every_device_tool_returns_plain_json_dict_through_mocked_layer(monkeypatch):
     server, _, _, _ = load_device_server(monkeypatch)
     server.queue = SerialDesktopQueue(action_timeout=2)
+    monkeypatch.setattr(server, "_app_is_running", lambda _app: True)
+    monkeypatch.setattr(server.webbrowser, "open", lambda *_args, **_kwargs: True)
     def success(*args):
         return {"success": True, "args": list(args)}
     server.desktop = SimpleNamespace(
@@ -192,6 +194,8 @@ async def test_every_device_tool_returns_plain_json_dict_through_mocked_layer(mo
         spotify_next=success,
         spotify_previous=success,
         open_app=success,
+        open_url=success,
+        youtube_search=success,
         close_app=success,
         set_volume=success,
         type_text=success,
@@ -216,6 +220,8 @@ async def test_every_device_tool_returns_plain_json_dict_through_mocked_layer(mo
         "spotify_next": {},
         "spotify_previous": {},
         "open_app": {"app": "notepad"},
+        "open_url": {"url": "https://example.org/path"},
+        "youtube_search": {"query": "lofi hip hop"},
         "close_app": {"app": "notepad"},
         "set_volume": {"level": 10},
         "type_text": {"text": "mocked"},
@@ -239,6 +245,95 @@ async def test_every_device_tool_returns_plain_json_dict_through_mocked_layer(mo
         assert not inspect.isawaitable(result), name
         assert isinstance(result, dict), name
         json.dumps(result)
+
+
+@pytest.mark.asyncio
+async def test_open_app_rejects_unknown_names_without_launching(monkeypatch):
+    server, _, _, _ = load_device_server(monkeypatch)
+    server.queue = SerialDesktopQueue(action_timeout=2)
+    monkeypatch.setattr(server.desktop, "open_app", lambda _app: pytest.fail("unknown app must not launch"))
+
+    result = await server.open_app("YouTube")
+
+    assert result["success"] is False
+    assert result["verified"] is False
+    assert result["attempted"] is False
+    assert result["message"].startswith("unknown app: YouTube, I can open:")
+
+
+@pytest.mark.asyncio
+async def test_open_app_reports_verified_only_after_mocked_process_is_found(monkeypatch):
+    server, _, _, _ = load_device_server(monkeypatch)
+    server.queue = SerialDesktopQueue(action_timeout=2)
+    launched = []
+    monkeypatch.setattr(server.desktop, "open_app", lambda app: launched.append(app) or {"success": True})
+    monkeypatch.setattr(
+        server.subprocess, "run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout='"notepad.exe","123"\n'),
+    )
+
+    result = await server.open_app("Notepad")
+
+    assert launched == ["notepad"]
+    assert result["success"] is True
+    assert result["verified"] is True
+
+
+@pytest.mark.asyncio
+async def test_open_app_can_verify_a_matching_mocked_window(monkeypatch):
+    server, _, _, _ = load_device_server(monkeypatch)
+    server.queue = SerialDesktopQueue(action_timeout=2)
+    monkeypatch.setattr(server.desktop, "open_app", lambda _app: {"success": True})
+    monkeypatch.setattr(
+        server.subprocess, "run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=""),
+    )
+
+    result = await server.open_app("Visual Studio Code")
+
+    assert result["success"] is True
+    assert result["verified"] is True
+
+
+@pytest.mark.asyncio
+async def test_open_app_does_not_claim_success_without_process_or_window(monkeypatch):
+    server, _, _, _ = load_device_server(monkeypatch)
+    server.queue = SerialDesktopQueue(action_timeout=2)
+    monkeypatch.setattr(server, "APP_VERIFY_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(server.desktop, "open_app", lambda _app: {"success": True, "message": "Opened notepad"})
+    monkeypatch.setattr(
+        server.subprocess, "run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=""),
+    )
+    monkeypatch.setattr(server.time, "sleep", lambda _seconds: None)
+
+    result = await server.open_app("Notepad")
+
+    assert result["success"] is False
+    assert result["verified"] is False
+    assert result["attempted"] is True
+    assert result["message"] == "I tried, but I couldn't confirm it opened."
+
+
+@pytest.mark.asyncio
+async def test_open_url_validates_and_queues_browser_calls(monkeypatch):
+    server, _, _, _ = load_device_server(monkeypatch)
+    server.queue = SerialDesktopQueue(action_timeout=2)
+    opened = []
+    monkeypatch.setattr(server.webbrowser, "open", lambda url, **_kwargs: opened.append(url) or True)
+
+    assert (await server.open_url("https://example.org/path"))["success"] is True
+    assert (await server.youtube_search("lofi hip hop"))["success"] is True
+    assert opened == [
+        "https://example.org/path",
+        "https://www.youtube.com/results?search_query=lofi+hip+hop",
+    ]
+    for rejected in (
+        "file:///C:/secret.txt", "javascript:alert(1)", r"C:\\secret.txt",
+        "http://localhost", "http://192.168.1.1",
+    ):
+        with pytest.raises(ValueError, match="external http or https"):
+            await server.open_url(rejected)
 
 
 def test_action_submitted_after_panic_runs_normally():

@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import httpx
 import pytest
 from cryptography.fernet import Fernet
-from langchain_core.messages import AIMessageChunk, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages.utils import convert_to_openai_messages
 from langchain_core.tools import StructuredTool
@@ -21,13 +21,17 @@ from core.app import app
 from core.graph.runtime import (
     FIXED_RULES,
     CoreGraphRuntime,
+    DEVICE_TOOL_NAMES,
     RouteDecision,
     _scan_openai_payload,
+    _verified_tool_names,
+    _unverified_open_fallback,
     device_mcp_connection,
 )
 from core.policy_gate import ToolPolicy
 from core.__main__ import FlushingStreamHandler
 from core.mcp_adapters.google_workspace import GOOGLE_REQUIRED_SOURCES, adapt_google_tools
+from core.mcp_adapters.google_workspace import GOOGLE_TOOL_SOURCES
 from core.pii.vault import PIIVault
 from core.skills_runtime import SkillsRuntime
 
@@ -71,6 +75,38 @@ def test_skills_runtime_loads_index_and_only_selected_device_tools():
     assert "whatsapp_read" not in runtime.tool_names(["whatsapp"])
     assert runtime.tool_names(["whatsapp"]) == {"whatsapp_send", "whatsapp_voice_call"}
     assert len(runtime.activate(["spotify", "desktop", "whatsapp", "vscode"])) == 3
+
+
+def test_every_skill_tool_is_present_in_the_registered_core_tool_names():
+    runtime = SkillsRuntime(Path(__file__).resolve().parents[2] / "skills")
+    skill_tool_names = runtime.tool_names(runtime.skills)
+    registered_tool_names = DEVICE_TOOL_NAMES | set(GOOGLE_TOOL_SOURCES) | {
+        "web_search", "get_weather", "calculator", "memory_search", "memory_forget", "load_skill",
+    }
+    assert skill_tool_names <= registered_tool_names
+
+
+def test_open_app_claim_requires_verified_tool_result():
+    call = AIMessage(content="", tool_calls=[{
+        "name": "open_app", "args": {"app": "notepad"}, "id": "open-app-1", "type": "tool_call",
+    }])
+    messages = [HumanMessage(content="open notepad"), call, ToolMessage(
+        content=json.dumps({
+            "success": False, "verified": False, "attempted": True,
+            "message": "I tried, but I couldn't confirm it opened.",
+        }),
+        name="open_app", tool_call_id="open-app-1",
+    )]
+    assert _unverified_open_fallback("I opened it.", messages) == "I tried, but I couldn't confirm it opened."
+    assert "open_app" not in _verified_tool_names(messages)
+    assert _unverified_open_fallback("I couldn't confirm it opened.", []) is None
+
+    messages[-1] = ToolMessage(
+        content=json.dumps({"success": True, "verified": True}),
+        name="open_app", tool_call_id="open-app-1",
+    )
+    assert "open_app" in _verified_tool_names(messages)
+    assert _unverified_open_fallback("I opened it.", messages) is None
 
 
 @pytest.mark.asyncio

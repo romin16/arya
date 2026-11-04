@@ -65,7 +65,7 @@ DEVICE_MCP_URL = "http://127.0.0.1:5002/mcp/"
 GOOGLE_MCP_URL = "http://127.0.0.1:8321/mcp"
 DEVICE_TOOL_NAMES = {
     "spotify_play", "spotify_pause", "spotify_resume", "spotify_next", "spotify_previous",
-    "open_app", "close_app", "set_volume", "type_text", "take_screenshot", "lock_screen",
+    "open_app", "open_url", "youtube_search", "close_app", "set_volume", "type_text", "take_screenshot", "lock_screen",
     "open_downloads", "open_documents", "whatsapp_send", "whatsapp_voice_call", "vscode_open",
     "vscode_open_file", "vscode_search", "vscode_run_command", "vscode_format",
 }
@@ -75,6 +75,12 @@ CONTENT_FROM_CURRENT_TURN_TOOLS = {
 }
 
 DEVICE_TOOL_DESCRIPTIONS = {
+    "open_app": (
+        "Open a desktop application only. Do not use this for websites or URLs; use open_url or youtube_search. "
+        "Only claim it opened when the result has verified=true."
+    ),
+    "open_url": "Open an external HTTP or HTTPS page in the default browser.",
+    "youtube_search": "Open YouTube search results for the requested query in the default browser.",
     "whatsapp_send": (
         "Send the WhatsApp message requested by the user to the resolved contact. Call this when they ask to "
         "message someone; the code policy gate automatically requests approval before sending. Do not claim it was "
@@ -518,15 +524,21 @@ def _apply_pending_approval_edits(
 
 
 def _verified_tool_names(messages: list[Any]) -> set[str]:
+    last_human_index = max(
+        (index for index, message in enumerate(messages) if isinstance(message, HumanMessage)),
+        default=-1,
+    )
     results = {
         message.tool_call_id: message
         for message in messages if isinstance(message, ToolMessage)
     }
     successful = set()
-    for message in messages:
+    for message_index, message in enumerate(messages):
         if not isinstance(message, AIMessage):
             continue
         for call in message.tool_calls:
+            if call.get("name") == "open_app" and message_index <= last_human_index:
+                continue
             result = results.get(call.get("id"))
             if result is None or result.status == "error":
                 continue
@@ -538,12 +550,53 @@ def _verified_tool_names(messages: list[Any]) -> set[str]:
             if isinstance(parsed, dict):
                 if parsed.get("success") is False:
                     continue
+                if call.get("name") == "open_app" and parsed.get("verified") is not True:
+                    continue
                 if parsed.get("outcome") in {
                     "failed", "no_op", "rejected", "expired", "awaiting_approval", "approved",
                 }:
                     continue
             successful.add(str(call.get("name", "")))
     return successful
+
+
+def _has_unverified_open_attempt(messages: list[Any]) -> bool:
+    last_human_index = max(
+        (index for index, message in enumerate(messages) if isinstance(message, HumanMessage)),
+        default=-1,
+    )
+    latest_tool_call_index = next(
+        (
+            index for index in range(len(messages) - 1, last_human_index, -1)
+            if isinstance(messages[index], AIMessage) and messages[index].tool_calls
+        ),
+        None,
+    )
+    if latest_tool_call_index is None:
+        return False
+    calls = messages[latest_tool_call_index].tool_calls
+    open_call_ids = {
+        call.get("id") for call in calls if call.get("name") == "open_app"
+    }
+    for message in messages[latest_tool_call_index + 1 :]:
+        if not isinstance(message, ToolMessage) or message.name != "open_app" or message.tool_call_id not in open_call_ids:
+            continue
+        try:
+            result = json.loads(message.content) if isinstance(message.content, str) else message.content
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if isinstance(result, dict) and result.get("attempted") is True and result.get("verified") is not True:
+            return True
+    return False
+
+
+def _unverified_open_fallback(reply: str, messages: list[Any]) -> str | None:
+    claims_open = re.search(r"\b(?:opened|started|launched)\b", reply, re.I)
+    return (
+        "I tried, but I couldn't confirm it opened."
+        if claims_open and _has_unverified_open_attempt(messages)
+        else None
+    )
 
 
 def _unsupported_claims(reply: str, state: ARYAState) -> list[str]:
@@ -562,7 +615,10 @@ def _unsupported_claims(reply: str, state: ARYAState) -> list[str]:
         (r"\bupdated\b", {"calendar_update", "contacts_update", "calendar_move"}, "update"),
         (r"\bpaused\b", {"spotify_pause"}, "pause"),
         (r"\b(?:resumed|playing)\b", {"spotify_resume", "spotify_play"}, "play"),
-        (r"\bopened\b", {"open_app", "vscode_open", "vscode_open_file", "open_downloads", "open_documents"}, "open"),
+        (r"\b(?:opened|started|launched)\b", {
+            "open_app", "open_url", "youtube_search", "vscode_open", "vscode_open_file",
+            "open_downloads", "open_documents",
+        }, "open"),
         (r"\bclosed\b", {"close_app"}, "close"),
     )
     issues = []
@@ -1715,6 +1771,10 @@ class CoreGraphRuntime:
                         or "device tool " in message
                         or "Google CSE" in message
                         or "Tavily" in message
+                        or "TAVILY_API_KEY" in message
+                        or "SEARCH_PROVIDER" in message
+                        or "GOOGLE_SEARCH_API_KEY" in message
+                        or "BRAVE_SEARCH_API_KEY" in message
                         or "Brave Search" in message
                         or "location" in message
                         or "expression" in message
@@ -1779,6 +1839,13 @@ class CoreGraphRuntime:
         async def verifier(state: ARYAState) -> dict[str, Any]:
             reply_message = state["messages"][-1]
             reply = _text_value(reply_message.content)
+            safe_reply = _unverified_open_fallback(reply, state.get("messages", []))
+            if safe_reply:
+                get_stream_writer()({"kind": "token", "text": safe_reply})
+                return {
+                    "messages": [AIMessage(content=safe_reply)],
+                    "verification_passed": False,
+                }
             issues = _unsupported_claims(reply, state)
             writer = get_stream_writer()
             if not issues:

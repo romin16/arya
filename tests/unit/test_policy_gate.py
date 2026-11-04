@@ -9,7 +9,7 @@ from core.policy_gate import ToolPolicy
 def test_policy_uses_configured_mode_and_most_specific_tool_match():
     policy = ToolPolicy.from_file(Path("config/policy.yaml"), {
         "gmail_send", "gmail_search", "whatsapp_send", "whatsapp_voice_call", "close_app",
-        "open_app", "set_volume", "type_text", "take_screenshot", "spotify_play",
+        "open_app", "open_url", "youtube_search", "set_volume", "type_text", "take_screenshot", "spotify_play",
         "vscode_open", "vscode_search", "vscode_format", "vscode_run_command", "gmail_reply",
         "gmail_delete", "calendar_delete", "calendar_delete_calendar", "contacts_delete",
         "web_search",
@@ -40,6 +40,16 @@ def test_taint_escalates_only_auto_side_effects():
     assert policy.mode_for("contacts_create", {"given_name": "Test"}, tainted=True) == "ask"
     assert policy.mode_for("gmail_search", {"query": "robotics"}, tainted=True) == "auto"
     assert policy.mode_for("calculator", {"expression": "2+2"}, tainted=True) == "auto"
+
+
+def test_tainted_browser_navigation_requires_approval_off_allowlist():
+    config = yaml.safe_load(Path("config/policy.yaml").read_text(encoding="utf-8"))
+    registered = set(config["tools"]) | {"open_url", "youtube_search"}
+    policy = ToolPolicy(config, registered)
+    assert policy.mode_for("open_url", {"url": "https://github.com"}, tainted=True) == "ask"
+    assert policy.mode_for("open_url", {"url": "https://docs.google.com"}, tainted=True) == "auto"
+    assert policy.mode_for("youtube_search", {"query": "lofi"}, tainted=True) == "auto"
+    assert policy.mode_for("open_url", {"url": "https://github.com"}, tainted=False) == "auto"
 
 
 def test_approval_edit_reconfirmation_defaults_on_and_is_configurable():
