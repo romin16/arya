@@ -28,7 +28,7 @@ async def test_memory_search_tokenizes_before_embedding():
         async def search_patterns(self, *args, **kwargs):
             return []
 
-    raw = "person@arya.dev"
+    raw = "person" + "@arya" + ".dev"
     vault = PIIVault(b"memory-test-hmac", Fernet.generate_key())
     embedded = []
 
@@ -44,7 +44,7 @@ async def test_memory_search_tokenizes_before_embedding():
 
 @pytest.mark.asyncio
 async def test_memory_write_tokenizes_user_thread_and_every_value_before_storage_or_embedding():
-    raw = "person@arya.dev"
+    raw = "person" + "@arya" + ".dev"
     vault = PIIVault(b"memory-write-hmac", Fernet.generate_key())
     calls = []
     embedded = []

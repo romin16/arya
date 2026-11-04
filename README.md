@@ -103,6 +103,25 @@ the configured suites; `uv run python -m evals.run --live --models gpt-4o,gpt-4o
 uses OpenAI and reports live results. Tests mock Google, provider HTTP calls,
 and GUI operations.
 
+### Secret scan before pushing
+
+The scanner checks tracked files and all reachable Git history for provider
+keys, non-placeholder email addresses, and phone numbers. It prints finding
+locations and categories only, never matched values. Run it directly:
+
+```powershell
+.\scripts\check_secrets.ps1
+```
+
+To enable it as a local pre-push hook:
+
+```powershell
+git config core.hooksPath .githooks
+```
+
+Git then runs `.githooks/pre-push` before each push. A finding blocks the push;
+rotate any exposed credential and handle historical secrets before publishing.
+
 ## Scope and safety
 
 ARYA is a personal-use project, not production software. It can send messages,

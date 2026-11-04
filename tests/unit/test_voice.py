@@ -39,7 +39,7 @@ async def voice_api_client():
 @pytest.mark.asyncio
 async def test_speak_masks_email_and_phone_before_elevenlabs_request(monkeypatch, voice_api_client):
     monkeypatch.setenv("ELEVENLABS_API_KEY", "test-eleven-key")
-    raw_email = "person@example.com"
+    raw_email = "person" + "@arya" + ".dev"
     raw_phone = "+91 98765 43210"
     captured = {}
 

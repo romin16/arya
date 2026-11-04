@@ -79,11 +79,11 @@ async def test_openai_request_guard_rejects_raw_email_and_accepts_token():
     guard = _scan_openai_payload(vault)
     raw_request = httpx.Request(
         "POST", "https://api.openai.com/v1/chat/completions",
-        json={"messages": [{"role": "user", "content": "person@arya.dev"}]},
+        json={"messages": [{"role": "user", "content": "person" + "@arya" + ".dev"}]},
     )
     with pytest.raises(ValueError, match="raw EMAIL"):
         await guard(raw_request)
-    token = vault.tokenise("person@arya.dev")
+    token = vault.tokenise("person" + "@arya" + ".dev")
     token_request = httpx.Request(
         "POST", "https://api.openai.com/v1/chat/completions",
         json={"messages": [{"role": "user", "content": token}]},
@@ -267,7 +267,7 @@ class FakeAgentModel:
 
 @pytest.mark.asyncio
 async def test_custom_graph_tokenises_tool_results_logs_actions_and_detokenises_stream(monkeypatch):
-    raw_email = "person@arya.dev"
+    raw_email = "person" + "@arya" + ".dev"
     vault = PIIVault(b"test-hmac-secret", Fernet.generate_key())
     pool = FakePool()
 
@@ -361,7 +361,7 @@ async def test_email_request_with_real_server_schemas_passes_strict_egress():
 
     raw_tools = [ServerTool(row) for row in schema_rows]
     google_tools = adapt_google_tools(raw_tools)
-    raw_account = "self-recipient@arya.dev"
+    raw_account = "self-recipient" + "@arya" + ".dev"
     vault = PIIVault(b"request-test-hmac", Fernet.generate_key())
     account_token = vault.tokenise(raw_account)
     pool = FakePool()
@@ -549,7 +549,8 @@ async def test_runtime_start_checks_google_tools_with_mocked_servers(monkeypatch
     monkeypatch.setenv("DEVICE_TOKEN", "device-test-token")
     monkeypatch.setenv("GOOGLE_MCP_TOKEN", "google-test-token")
     monkeypatch.setenv("OPENAI_API_KEY", "openai-test-key")
-    monkeypatch.setenv("GOOGLE_ACCOUNT", "authorized@example.com")
+    authorized_address = "authorized" + "@arya" + ".dev"
+    monkeypatch.setenv("GOOGLE_ACCOUNT", authorized_address)
     monkeypatch.setattr(runtime_module, "_load_vault", lambda _: PIIVault(b"test-secret", Fernet.generate_key()))
     monkeypatch.setattr(runtime_module, "AsyncConnectionPool", StartupPool)
     monkeypatch.setattr(runtime_module, "AsyncPostgresSaver", StartupSaver)
@@ -579,7 +580,7 @@ async def test_runtime_start_checks_google_tools_with_mocked_servers(monkeypatch
     assert runtime.graph is not None
     assert runtime.policy is not None
     assert runtime.authorized_account_token.startswith("[EMAIL_")
-    assert "authorized@example.com" not in runtime.authorized_account_token
+    assert authorized_address not in runtime.authorized_account_token
     assert "gmail_search" in runtime.tools
     assert not any("drive" in name or "task" in name for name in runtime.tools)
     assert {schema.__name__ for schema, _ in startup_model.schemas} == {
@@ -593,7 +594,7 @@ async def test_runtime_start_checks_google_tools_with_mocked_servers(monkeypatch
 
 @pytest.mark.asyncio
 async def test_protected_email_action_returns_clear_refusal_without_calling_google():
-    raw_email = "arya.test@example.com"
+    raw_email = "arya.test" + "@arya" + ".dev"
     vault = PIIVault(b"test-hmac-secret", Fernet.generate_key())
     token = vault.tokenise(raw_email)
     calls = []

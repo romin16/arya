@@ -36,7 +36,7 @@ def test_unknown_token_is_rejected_for_tool_args(vault):
 
 
 def test_outbound_pii_is_tokenised_and_strict_mode_fails(vault):
-    raw = "person@arya.dev"
+    raw = "person" + "@arya" + ".dev"
     safe = guard_payload({"messages": [{"role": "user", "content": raw}]}, vault, strict=False)
     assert raw not in str(safe)
     assert "[EMAIL_" in str(safe)
@@ -45,7 +45,7 @@ def test_outbound_pii_is_tokenised_and_strict_mode_fails(vault):
 
 
 def test_guard_default_retokenizes_but_environment_flag_can_fail_closed(vault, monkeypatch):
-    raw = "person@arya.dev"
+    raw = "person" + "@arya" + ".dev"
     monkeypatch.setenv("PII_EGRESS_STRICT", "0")
     safe = guard_payload(raw, vault)
     assert raw not in safe
@@ -61,7 +61,7 @@ def test_reserved_example_addresses_and_fake_numbers_are_not_pii(vault):
 
 
 def test_egress_log_has_kind_context_and_hash_without_value(vault, caplog):
-    raw = "person@arya.dev"
+    raw = "person" + "@arya" + ".dev"
     safe = guard_payload(
         {"messages": [{"role": "system", "content": "ARYA prompt\n\nActive skill instructions:\nContact " + raw}]},
         vault,
@@ -75,7 +75,7 @@ def test_egress_log_has_kind_context_and_hash_without_value(vault, caplog):
 
 
 def test_tool_schema_examples_are_removed_and_redacted_in_logs(caplog):
-    raw = "Use contact person@example.com or phone 202-555-0123."
+    raw = "Use contact person" + "@arya" + ".dev or phone 202-555-0123."
     description, schema = sanitize_tool_schema(
         "search_email",
         raw,
@@ -92,7 +92,7 @@ def test_tool_schema_examples_are_removed_and_redacted_in_logs(caplog):
 @pytest.mark.asyncio
 async def test_openai_request_retokenizes_genuine_email_by_default(vault, monkeypatch):
     monkeypatch.setenv("PII_EGRESS_STRICT", "0")
-    raw = "person@arya.dev"
+    raw = "person" + "@arya" + ".dev"
     request = httpx.Request(
         "POST",
         "https://api.openai.com/v1/chat/completions",

@@ -38,13 +38,14 @@ def test_langfuse_callback_exports_only_tokenised_content():
     callback = PIISafeCallbackHandler(
         sink, vault, session_id="thread@example.org", user_id="alex@example.org",
     )
-    raw = "Email alex@example.org or call +1 415-555-2671."
+    fake_phone = "+1 415-555-0134"
+    raw = "Email alex@example.org or call " + fake_phone + "."
     callback.on_chat_model_start(
         {"name": "chat-model"}, [[HumanMessage(content=raw)]], run_id=uuid4(),
     )
     exported = repr(sink.received)
     assert "alex@example.org" not in exported
-    assert "+1 415-555-2671" not in exported
+    assert fake_phone not in exported
     assert "[EMAIL_" in exported
     assert "[PHONE_" in exported
 
@@ -52,7 +53,7 @@ def test_langfuse_callback_exports_only_tokenised_content():
     callback.on_chain_start({"name": "graph"}, {"input": raw}, run_id=run_id)
     exported_chain = repr(sink.runs[run_id])
     assert "alex@example.org" not in exported_chain
-    assert "+1 415-555-2671" not in exported_chain
+    assert fake_phone not in exported_chain
     assert "[EMAIL_" in exported_chain
     assert "[PHONE_" in exported_chain
 
@@ -123,7 +124,7 @@ def test_chat_trace_context_exports_only_tokenised_input(monkeypatch):
             vault=vault,
             session_id="thread@example.org",
             user_id="alex@example.org",
-            message="Contact alex@example.org at +1 415-555-2671",
+            message="Contact alex@example.org at +1 415-555-0134",
         ):
             pass
 
@@ -132,7 +133,7 @@ def test_chat_trace_context_exports_only_tokenised_input(monkeypatch):
 
     exported = repr((client.input, client.span.outputs, propagated))
     assert "alex@example.org" not in exported
-    assert "+1 415-555-2671" not in exported
+    assert "+1 415-555-0134" not in exported
     assert "[EMAIL_" in exported
     assert "[PHONE_" in exported
     assert client.input[0] == "arya.chat"
