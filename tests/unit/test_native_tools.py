@@ -1,11 +1,20 @@
 import json
+from pathlib import Path
 
 import httpx
 import pytest
+import yaml
 
 from core.tools.calculator import calculate
 from core.tools.search import SearchError, SearchService
 from core.tools.weather import WeatherService
+
+
+def test_default_search_provider_is_tavily():
+    settings = yaml.safe_load(
+        (Path(__file__).resolve().parents[2] / "config" / "search.yaml").read_text(encoding="utf-8")
+    )["search"]
+    assert settings["provider"] == "tavily"
 
 
 def test_calculator_evaluates_arithmetic_without_python_eval():

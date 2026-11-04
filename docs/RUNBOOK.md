@@ -77,7 +77,7 @@ Serve `frontend/` with `scripts/serve_frontend.ps1` and open `http://localhost:8
 
 ## Search provider
 
-`config/search.yaml` selects `search.provider`. Google Custom Search uses `GOOGLE_SEARCH_API_KEY` and `GOOGLE_SEARCH_ENGINE_ID`; results are capped at five. On quota or permission errors, configured alternatives are tried when their keys exist. Tavily and Brave can be selected by changing this setting and providing the matching key. Switching providers requires only a config change. Google has announced that Custom Search JSON API access will close to new customers and the API will be discontinued on January 1, 2027.
+`config/search.yaml` defaults to Tavily (`TAVILY_API_KEY`); a local `.env` can override the provider on your machine. Google Custom Search remains selectable with `GOOGLE_SEARCH_API_KEY` and `GOOGLE_SEARCH_ENGINE_ID`; results are capped at five. On quota or permission errors, configured alternatives are tried when their keys exist. Tavily and Brave can be selected by changing this setting and providing the matching key. Switching providers requires only a config change. Google has announced that Custom Search JSON API access will close to new customers and the API will be discontinued on January 1, 2027.
 
 ## Tests and operations
 
