@@ -30,7 +30,7 @@ Most recent local test status after the schema-drift repair: 121 unit tests and 
 
 ## 3. Phase 7 status
 
-- Langfuse callback integration and PII-safe recording tests are implemented. The user confirmed traces appear in the existing local Langfuse instance. Do not touch `C:\Users\abc\langfuse` or start another stack. Compose scripts pass the external directory and env file explicitly and reject an in-repository directory.
+- Langfuse callback integration and PII-safe recording tests are implemented. The user confirmed traces appear in the existing local Langfuse instance. Do not touch `C:\path\to\langfuse` or start another stack. Compose scripts pass the external directory and env file explicitly and reject an in-repository directory.
 - Versioned migrations 001–003, `schema_migrations`, post-migration object verification, and the core schema/read-query startup guard are implemented. Migration 003 adds/backfills `knowledge_chunks.title`; the authorized apply completed on the real database at version 3. The last catalog diff had no missing code-referenced columns.
 - Outgoing email, WhatsApp, and calendar text is isolated from recalled memory. The memory writer receives user-authored messages only, and entities require an explicit matching first-person fact. Read-only contact lookups cannot store returned contact data.
 - Langfuse retries authentication in the background with backoff and logs once after reconnecting. The user confirmed traces appear in the existing instance.

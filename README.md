@@ -1,18 +1,115 @@
 # ARYA
 
-Local-first assistant for Windows. The verified runtime uses Python 3.12, `uv`, and PostgreSQL with pgvector. See [docs/RUNBOOK.md](docs/RUNBOOK.md) for setup and launch instructions, and [docs/PHASE_6.md](docs/PHASE_6.md) for the approval behavior.
+ARYA is a local-first voice and chat assistant for Windows. A Python core runs a
+LangGraph conversation, while separate local services handle speech and desktop
+actions. Google Workspace tools run in their own MCP process. PostgreSQL stores
+conversation checkpoints and memory. The browser client is in `frontend/`.
 
-## PostgreSQL integration tests
+## Architecture
 
-The graph integration tests run only when `ARYA_TEST_DATABASE_URL` points to a disposable PostgreSQL database. Create an isolated test database, apply the current schema, and then run pytest from PowerShell:
-
-```powershell
-createdb arya_test
-$env:DATABASE_URL = "postgresql://arya:YOUR_LOCAL_PASSWORD@127.0.0.1:5432/arya_test"
-uv run --no-sync python -m db.apply_schema
-$env:ARYA_TEST_DATABASE_URL = $env:DATABASE_URL
-uv run --no-sync pytest
-Remove-Item Env:ARYA_TEST_DATABASE_URL,Env:DATABASE_URL
+```mermaid
+flowchart LR
+    Browser[frontend/arya.html] -->|SSE chat| Core[Core · FastAPI + LangGraph]
+    Browser -->|speech| Voice[Voice · FastAPI]
+    Core -->|MCP · loopback| Device[Device · FastMCP]
+    Core -->|MCP · loopback| Google[Google Workspace MCP]
+    Core --> DB[(Postgres + pgvector)]
+    Core -. traces .-> Langfuse[Langfuse · optional]
+    Voice -->|TTS / STT providers| Providers[Configured providers]
 ```
 
-Use a local test database only; never point this variable at a production or personal data database. The test suite mocks network and GUI actions. The former `.phase6_test_runner.py` helper is not present in the repository; use the commands above or your own disposable-database wrapper.
+The services bind to `127.0.0.1` by default. The device process serializes GUI
+actions because those actions control the active Windows desktop.
+
+## What it does
+
+- Chat and voice conversations with streaming replies, wake-word handling,
+  speech-to-text, and text-to-speech.
+- Spotify and desktop controls through the device MCP server.
+- Gmail, Calendar, and Contacts through an independently authorized Google
+  Workspace MCP server.
+- Weather, web search, and a safe calculator as native tools.
+- Approval questions before protected side effects such as sending or deleting.
+- A verifier that checks action and memory claims against actual tool outcomes.
+- Optional Langfuse traces with PII-tokenised content.
+
+### Memory and privacy
+
+Memory uses five PostgreSQL stores: versioned entities, episodes, knowledge
+chunks, procedures, and patterns. Hybrid retrieval combines vector and full-text
+results. Forgotten procedures become inactive, disappear from reads and policy
+checks, and are eventually purged; tombstones suppress accidental recreation.
+
+The PII layer tokenises emails, phone numbers, and other detected personal
+values before content is sent to models, embeddings, external speech providers,
+or observability. A local encrypted vault maps those tokens back when a tool
+must use the real value. Treat `.env`, local frontend config, and access tokens
+as private credentials.
+
+## Windows quick start
+
+### Prerequisites
+
+- Windows 10 or 11, Python 3.12, Git, and [`uv`](https://docs.astral.sh/uv/).
+- PostgreSQL with `pgvector` and `pgcrypto` extensions available.
+- Node.js only if you need to set up the separately installed Google Workspace
+  MCP server.
+- Credentials for the providers you intend to use. Google OAuth authorization
+  is a manual one-time setup.
+
+### Configure and start
+
+In PowerShell, from the cloned repository:
+
+```powershell
+Copy-Item .env.example .env
+notepad .env
+uv sync --locked --extra observability --extra voice --extra device
+psql -d arya -c "CREATE EXTENSION IF NOT EXISTS vector;"
+psql -d arya -c "CREATE EXTENSION IF NOT EXISTS pgcrypto;"
+uv run --env-file .env python db/apply_schema.py
+.\deploy\start_all.ps1
+```
+
+Fill in `.env.example` values appropriate to your setup. Configure the Google
+Workspace MCP using [`docs/RUNBOOK.md`](docs/RUNBOOK.md). To open the browser
+client, in another PowerShell window run:
+
+```powershell
+.\scripts\serve_frontend.ps1
+```
+
+Then browse to <http://localhost:8080>. For optional Picovoice wake-word setup,
+see [`frontend/README.md`](frontend/README.md). Without a Picovoice key, the
+page uses the browser's Web Speech wake-word fallback where supported.
+
+The search default is Tavily (`TAVILY_API_KEY`). `config/search.yaml` can select
+Google Custom Search (`GOOGLE_SEARCH_API_KEY` and
+`GOOGLE_SEARCH_ENGINE_ID`) or Brave. Google says Custom Search is closed to new
+customers and will be discontinued on January 1, 2027. Existing local `.env`
+settings can override the repository default.
+
+## Tests and evaluations
+
+```powershell
+uv run pytest tests/unit -q
+uv run python scripts/run_postgres_tests.py
+uv run ruff check .
+uv run python -m evals.run
+```
+
+The Postgres test runner creates a disposable database. Offline eval mode lists
+the configured suites; `uv run python -m evals.run --live --models gpt-4o,gpt-4o-mini`
+uses OpenAI and reports live results. Tests mock Google, provider HTTP calls,
+and GUI operations.
+
+## Scope and safety
+
+ARYA is a personal-use project, not production software. It can send messages,
+change calendar data, and control your PC after approval. Review each approval
+carefully, keep credentials private, and use test accounts or contacts while
+evaluating side-effect tools. Do not run the device service in a session where
+unexpected desktop automation would be unsafe.
+
+See [`docs/RUNBOOK.md`](docs/RUNBOOK.md) for the detailed setup guide and
+[`docs/MIGRATION.md`](docs/MIGRATION.md) for the component migration map.

@@ -153,17 +153,17 @@ async def test_read_only_contact_lookup_cannot_write_entities_or_procedures():
         "user", "thread",
         {
             "entities": [
-                {"key": "contact", "value": "Aditya"},
+                {"key": "contact", "value": "Alex"},
                 {"key": "phone", "value": "+1 415-555-0184"},
                 {"key": "phone_type", "value": "mobile"},
-                {"key": "name", "value": "Aditya"},
+                {"key": "name", "value": "Alex"},
             ],
             "procedures": [
-                {"rule_text": "Never message Aditya", "severity": "hard"},
-                {"rule_text": "Always call Aditya", "severity": "hard"},
+                {"rule_text": "Never message Alex", "severity": "hard"},
+                {"rule_text": "Always call Alex", "severity": "hard"},
             ],
         },
-        user_texts=["Find Aditya's phone number"],
+        user_texts=["Find Alex's phone number"],
     )
     assert repo.entities == []
     assert repo.procedures == []

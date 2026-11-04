@@ -146,14 +146,14 @@ class ScriptedAgent:
                 yield AIMessageChunk(content="I understand the memory tool was not allowed.")
             else:
                 self.chosen_tools.append("memory_forget")
-                args = {"query": "Aditya", "confirm": False}
+                args = {"query": "Alex", "confirm": False}
                 yield _memory_forget_call(args, "misrouted-procedural-forget")
         elif lowered.startswith("forget"):
             self.chosen_tools.append("memory_forget")
-            args = {"query": "Aditya", "confirm": False}
+            args = {"query": "Alex", "confirm": False}
             yield _memory_forget_call(args, "forget-preview")
         elif lowered.strip(" .!\n") in {"confirm", "yes"}:
-            args = {"query": "Aditya", "confirm": True}
+            args = {"query": "Alex", "confirm": True}
             yield _memory_forget_call(args, "forget-confirm")
         else:
             yield AIMessageChunk(content="Saved for this test.")
@@ -188,12 +188,12 @@ class ScriptedWriter:
         # contact name are offered as entity facts. The service must reject them.
         return MemoryWrite(
             entities=[
-                MemoryEntity(key="Aditya_rule", value="Aditya", confidence=1.0),
-                MemoryEntity(key="contact", value="Aditya", confidence=1.0),
+                MemoryEntity(key="Alex_rule", value="Alex", confidence=1.0),
+                MemoryEntity(key="contact", value="Alex", confidence=1.0),
             ],
             episode=MemoryEpisode(
                 summary="A standing WhatsApp contact rule was set.",
-                body="Never message Aditya on WhatsApp again.",
+                body="Never message Alex on WhatsApp again.",
                 topics=[],
                 tools_used=[],
             ),
@@ -312,32 +312,32 @@ async def test_graph_forget_confirm_tombstone_dedup_and_writer_suppression():
     writer = ScriptedWriter()
     runtime = await _runtime(database_url, writer=writer, session=session)
     try:
-        rule = "Never message Aditya on WhatsApp again."
+        rule = "Never message Alex on WhatsApp again."
         first, _ = await _turn(runtime, rule, user_id)
-        assert first == "Saved: never message Aditya on WhatsApp again."
+        assert first == "Saved: never message Alex on WhatsApp again."
 
         user_token = runtime.vault.tokenise(user_id)
         entities = await runtime.memory.repositories.current_entities(user_token)
         assert entities == []
         for phrase in (
             rule,
-            "never   message Aditya on WhatsApp again",
-            "NEVER message Aditya on WhatsApp again!",
+            "never   message Alex on WhatsApp again",
+            "NEVER message Alex on WhatsApp again!",
         ):
             await runtime.memory.write_records(user_token, session, {}, user_texts=[phrase])
         active = await runtime.memory.repositories.active_procedures(user_token)
         assert len(active) == 1
         assert active[0]["tool_pattern"] == "whatsapp_send"
-        assert active[0]["argument_constraints"][0]["value"] == "Aditya"
+        assert active[0]["argument_constraints"][0]["value"] == "Alex"
 
-        preview, _ = await _turn(runtime, "Forget the rule about Aditya", user_id)
+        preview, _ = await _turn(runtime, "Forget the rule about Alex", user_id)
         assert "Found 1 matching memory item" in preview
         assert "Nothing was deleted" in preview
         assert len(await runtime.memory.repositories.active_procedures(user_token)) == 1
         pending = await runtime.memory.repositories.get_pending_operation(user_token, session)
         assert pending and pending["operation_type"] == "memory_forget"
         assert pending["payload"]["items"] == [{
-            "store": "procedures", "id": active[0]["id"], "preview": "Never message Aditya on WhatsApp again.",
+            "store": "procedures", "id": active[0]["id"], "preview": "Never message Alex on WhatsApp again.",
         }]
 
         confirmation, _ = await _turn(runtime, "confirm", user_id)
@@ -348,9 +348,9 @@ async def test_graph_forget_confirm_tombstone_dedup_and_writer_suppression():
         assert await runtime.memory.repositories.get_pending_operation(user_token, session) is None
 
         deleted_context, injected_procedures = await runtime.memory.always_context_and_procedures(user_token)
-        assert "Aditya" not in deleted_context
+        assert "Alex" not in deleted_context
         assert injected_procedures == []
-        assert hard_rule_for("whatsapp_send", {"contact": "Aditya"}, [
+        assert hard_rule_for("whatsapp_send", {"contact": "Alex"}, [
             {**active[0], "active": False},
         ]) is None
         async with runtime.pool.connection() as conn:
@@ -362,7 +362,7 @@ async def test_graph_forget_confirm_tombstone_dedup_and_writer_suppression():
         assert inactive["inactive_at"] is not None
 
         await runtime.memory.write_records(
-            user_token, session, {}, user_texts=["never   message Aditya on WhatsApp again"],
+            user_token, session, {}, user_texts=["never   message Alex on WhatsApp again"],
         )
         assert len(await runtime.memory.repositories.active_procedures(user_token)) == 0
         async with runtime.pool.connection() as conn:
@@ -407,11 +407,11 @@ async def test_pending_forget_wrong_text_reasks_and_expired_confirmation_does_no
     runtime = await _runtime(database_url, writer=writer, session=session)
     try:
         user_token = runtime.vault.tokenise(user_id)
-        await _turn(runtime, "Never message Aditya on WhatsApp again.", user_id)
+        await _turn(runtime, "Never message Alex on WhatsApp again.", user_id)
         await runtime.memory.write_records(
-            user_token, session, {}, user_texts=["Never message Aditya on WhatsApp again."],
+            user_token, session, {}, user_texts=["Never message Alex on WhatsApp again."],
         )
-        await _turn(runtime, "Forget the rule about Aditya", user_id)
+        await _turn(runtime, "Forget the rule about Alex", user_id)
 
         wrong_text, _ = await _turn(runtime, "banana", user_id)
         assert "Reply ‘confirm’" in wrong_text
@@ -458,8 +458,8 @@ async def test_procedural_route_beats_misrouted_forget_tool_and_full_confirm_flo
 
     runtime.memory.forget = tracked_forget
     try:
-        saved, _ = await _turn(runtime, "Never message Aditya on WhatsApp again.", user_id)
-        assert saved == "Saved: never message Aditya on WhatsApp again."
+        saved, _ = await _turn(runtime, "Never message Alex on WhatsApp again.", user_id)
+        assert saved == "Saved: never message Alex on WhatsApp again."
         assert runtime.main_model.chosen_tools == ["memory_forget"]
         assert forget_calls == []
         snapshot = await runtime.graph.aget_state({"configurable": {"thread_id": session}})
@@ -473,11 +473,11 @@ async def test_procedural_route_beats_misrouted_forget_tool_and_full_confirm_flo
         rows = await runtime.memory.repositories.active_procedures(user_token)
         assert len(rows) == 1
         assert rows[0]["tool_pattern"] == "whatsapp_send"
-        assert rows[0]["argument_constraints"][0]["value"] == "Aditya"
+        assert rows[0]["argument_constraints"][0]["value"] == "Alex"
         assert await runtime.memory.repositories.get_pending_operation(user_token, session) is None
 
         runtime.main_model = ScriptedAgent()
-        preview, _ = await _turn(runtime, "Forget the rule about Aditya", user_id)
+        preview, _ = await _turn(runtime, "Forget the rule about Alex", user_id)
         assert "Found 1 matching memory item" in preview
         wrong, _ = await _turn(runtime, "banana", user_id)
         assert "Reply ‘confirm’" in wrong
@@ -489,16 +489,16 @@ async def test_procedural_route_beats_misrouted_forget_tool_and_full_confirm_flo
         assert await runtime.memory.repositories.active_procedures(user_token) == []
         assert writer.calls == 0
         assert forget_calls == [  # Only the explicit forget request searched.
-            (user_token, "Aditya"),
+            (user_token, "Alex"),
         ]
         await runtime.memory.write_records(
-            user_token, session, {}, user_texts=["Never message Aditya on WhatsApp again."],
+            user_token, session, {}, user_texts=["Never message Alex on WhatsApp again."],
         )
         assert await runtime.memory.repositories.active_procedures(user_token) == []
         decisions = [record.getMessage() for record in caplog.records if record.getMessage().startswith("chat_decision ")]
         assert len(decisions) == 4
         assert any("route=procedural_write tool=memory_forget" in line for line in decisions)
-        assert all("Aditya" not in line for line in decisions)
+        assert all("Alex" not in line for line in decisions)
     finally:
         await runtime.close()
 
@@ -585,7 +585,7 @@ async def test_patterns_promote_only_after_observations_across_two_days_and_skip
         )
         await runtime.memory.write_records(
             user_token, session, records,
-            user_texts=[text, "Never message Aditya on WhatsApp again."],
+            user_texts=[text, "Never message Alex on WhatsApp again."],
             observation_day=date(2026, 3, 4),
         )
         await runtime.memory.write_records(

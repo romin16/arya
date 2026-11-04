@@ -1192,7 +1192,7 @@ class CoreGraphRuntime:
                 "Examples: 'What is my current salary?' => entity_read, no routed read; 'What did we decide last April?' "
                 "=> episode_read and a date-filtered episode read; 'How does a SIP work?' => knowledge_read and a knowledge read; "
                 "'I just changed jobs to TCS' => entity_update_and_episode_write; 'Never recommend equity to me again' "
-                "=> procedural_write; 'Forget the rule about Aditya' => memory_forget; 'I'm worried about market volatility' => pattern_read and a pattern read; "
+                "=> procedural_write; 'Forget the rule about Alex' => memory_forget; 'I'm worried about market volatility' => pattern_read and a pattern read; "
                 "'Delete the email draft' => none; "
                 "'What is the average salary for a Python developer?' => none; "
                 "'Change the text to hello from Arya' => none; 'Change the email body to revised text' => none; "

@@ -299,5 +299,5 @@ if __name__ == "__main__":
     time.sleep(2)
     
     print("\n📤 Sending test message...")
-    result = agent.send_message("Aditya", "Hello from ARYA - Windows Focus Fixed!")
+    result = agent.send_message("Alex", "Hello from ARYA - Windows Focus Fixed!")
     print(f"   Result: {result}")

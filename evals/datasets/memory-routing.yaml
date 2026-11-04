@@ -61,7 +61,7 @@
     - utterance: Compare equity funds with debt funds.
       operation: knowledge_read
       store: knowledge
-    - utterance: Forget the rule about Aditya.
+    - utterance: Forget the rule about Alex.
       operation: memory_forget
 - id: inferred_pattern
   operation: pattern_read
@@ -79,12 +79,12 @@
 - id: forget_memory
   operation: memory_forget
   utterances:
-    - Forget the rule about Aditya.
-    - Delete what you know about Aditya.
+    - Forget the rule about Alex.
+    - Delete what you know about Alex.
     - Remove that memory.
     - Clear my TCS info.
   negatives:
-    - utterance: Never message Aditya on WhatsApp again.
+    - utterance: Never message Alex on WhatsApp again.
       operation: procedural_write
     - utterance: Don't suggest stocks for me from now on.
       operation: procedural_write

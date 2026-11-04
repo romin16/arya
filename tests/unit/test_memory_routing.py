@@ -42,12 +42,12 @@ def test_hard_procedural_rules_block_calls_in_code():
 
 
 def test_contact_rules_get_tool_and_case_insensitive_argument_constraint_but_casual_chat_does_not():
-    rule, = explicit_user_rules(["Never message Aditya on WhatsApp again."])
+    rule, = explicit_user_rules(["Never message Alex on WhatsApp again."])
     assert rule["tool_pattern"] == "whatsapp_send"
     assert rule["argument_constraints"] == [{
-        "argument": "contact", "operator": "contains_casefold", "value": "Aditya",
+        "argument": "contact", "operator": "contains_casefold", "value": "Alex",
     }]
-    assert hard_rule_for("whatsapp_send", {"contact": "aDiTyA", "message": "hello"}, [rule]) is rule
+    assert hard_rule_for("whatsapp_send", {"contact": "aLeX", "message": "hello"}, [rule]) is rule
     assert hard_rule_for("whatsapp_send", {"contact": "Anita", "message": "hello"}, [rule]) is None
     assert explicit_user_rules(["Never run out of tech talk at the water cooler."]) == []
 
@@ -59,7 +59,7 @@ def test_employment_and_workplace_aliases_share_canonical_entity_key():
 
 
 @pytest.mark.parametrize("text", [
-    "Never message Aditya on WhatsApp again.",
+    "Never message Alex on WhatsApp again.",
     "Don't call the office after six.",
     "Always ask before changing my calendar.",
     "From now on, use short replies.",
@@ -70,8 +70,8 @@ def test_standing_instructions_are_never_forget_intent(text):
 
 
 @pytest.mark.parametrize("text", [
-    "Forget the rule about Aditya.",
-    "Delete the stored rule about Aditya.",
+    "Forget the rule about Alex.",
+    "Delete the stored rule about Alex.",
     "Remove that preference from memory.",
     "Clear my memory about this fact.",
     "Erase the remembered pattern.",
@@ -83,7 +83,7 @@ def test_memory_forget_needs_explicit_forget_or_stored_memory_target(text):
 @pytest.mark.parametrize("text", [
     "Delete the email draft.",
     "Clear my calendar.",
-    "Remove Aditya from the group.",
+    "Remove Alex from the group.",
 ])
 def test_non_memory_delete_requests_are_not_forget_intent(text):
     assert not _has_explicit_memory_forget_intent(text)
@@ -270,7 +270,7 @@ async def test_memory_write_is_queued_without_waiting_for_the_writer():
 
 @pytest.mark.asyncio
 async def test_mocked_model_cannot_bypass_hard_contact_rule_for_whatsapp_send():
-    rule = explicit_user_rules(["Never message Aditya on WhatsApp again."])[0]
+    rule = explicit_user_rules(["Never message Alex on WhatsApp again."])[0]
     tool_calls = []
 
     class Pool:
@@ -310,7 +310,7 @@ async def test_mocked_model_cannot_bypass_hard_contact_rule_for_whatsapp_send():
             if self.calls == 1:
                 yield AIMessageChunk(content="", tool_call_chunks=[{
                     "name": "whatsapp_send",
-                    "args": json.dumps({"contact": "aDiTyA", "message": "Hi"}),
+                    "args": json.dumps({"contact": "aLeX", "message": "Hi"}),
                     "id": "blocked-send",
                     "index": 0,
                 }])
@@ -329,7 +329,7 @@ async def test_mocked_model_cannot_bypass_hard_contact_rule_for_whatsapp_send():
     runtime.router_model = Router()
     runtime.main_model = Agent()
     runtime.memory = Memory()
-    assert hard_rule_for("whatsapp_send", {"contact": "aDiTyA", "message": "Hi"}, [rule]) is rule
+    assert hard_rule_for("whatsapp_send", {"contact": "aLeX", "message": "Hi"}, [rule]) is rule
     runtime.tools = {
         "whatsapp_send": StructuredTool.from_function(coroutine=send, name="whatsapp_send", description="Send a WhatsApp message")
     }
@@ -343,7 +343,7 @@ async def test_mocked_model_cannot_bypass_hard_contact_rule_for_whatsapp_send():
     runtime.load_skill_tool = StructuredTool.from_function(coroutine=load_skill, name="load_skill", description="Load a skill")
     runtime.graph = runtime._build_graph()
     events = [event async for event in runtime.stream_turn(
-        SimpleNamespace(message="Send a WhatsApp message to Aditya", user_id="policy-user"),
+        SimpleNamespace(message="Send a WhatsApp message to Alex", user_id="policy-user"),
         "blocked-contact",
     )]
     response = "".join(event["chunk"] for event in events if "chunk" in event)
@@ -433,14 +433,14 @@ async def test_background_writer_excludes_contact_tool_results_and_rejects_looku
             assert "contact_lookup_result_secret" not in prompt
             return MemoryWrite(
                 entities=[
-                    {"key": "contact", "value": "Aditya"},
+                    {"key": "contact", "value": "Alex"},
                     {"key": "phone", "value": raw_phone},
                     {"key": "phone_type", "value": "mobile"},
-                    {"key": "phone_owner", "value": "Aditya"},
+                    {"key": "phone_owner", "value": "Alex"},
                 ],
                 procedures=[
-                    {"rule_text": "Never contact Aditya", "severity": "hard"},
-                    {"rule_text": "Always call Aditya", "severity": "hard"},
+                    {"rule_text": "Never contact Alex", "severity": "hard"},
+                    {"rule_text": "Always call Alex", "severity": "hard"},
                 ],
                 episode=None,
                 patterns=[],
@@ -449,9 +449,9 @@ async def test_background_writer_excludes_contact_tool_results_and_rejects_looku
     runtime.memory_writer_model = Writer()
     await runtime._background_memory_write({
         "messages": [
-            HumanMessage(content="Find Aditya's phone number"),
+            HumanMessage(content="Find Alex's phone number"),
             ToolMessage(
-                content="Aditya: " + raw_phone + " contact_lookup_result_secret",
+                content="Alex: " + raw_phone + " contact_lookup_result_secret",
                 name="contacts_search",
                 tool_call_id="lookup-1",
             ),

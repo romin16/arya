@@ -160,8 +160,8 @@ async def test_phase1_schema_runs_all_memory_store_read_and_write_paths():
         assert knowledge[0]["title"] == "New title"
 
         await repo.add_procedure(
-            "u", "Never message Aditya on WhatsApp", tool_pattern="whatsapp_send",
-            argument_constraints=[{"argument": "contact", "value": "Aditya"}],
+            "u", "Never message Alex on WhatsApp", tool_pattern="whatsapp_send",
+            argument_constraints=[{"argument": "contact", "value": "Alex"}],
         )
         assert (await repo.active_procedures("u"))[0]["tool_pattern"] == "whatsapp_send"
 

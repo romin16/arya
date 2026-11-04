@@ -30,7 +30,7 @@ async def evaluate_memory_routing(router, dataset: list[dict]):
         "User: How does a SIP work? => knowledge_read, one knowledge read.\n"
         "User: I just changed jobs to TCS. => entity_update_and_episode_write, no routed read.\n"
         "User: Never recommend equity to me again. => procedural_write, no routed read.\n"
-        "User: Forget the rule about Aditya. => memory_forget, no routed read.\n"
+        "User: Forget the rule about Alex. => memory_forget, no routed read.\n"
         "User: Delete the email draft. => none.\n"
         "User: I'm worried about market volatility. => pattern_read, one pattern read.\n"
         "User: What is the average salary for a Python developer? => none.\n"

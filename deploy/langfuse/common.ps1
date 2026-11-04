@@ -24,7 +24,7 @@ function Get-LangfuseComposeContext([string]$RepoRoot) {
     $configuredDir = if ($env:LANGFUSE_COMPOSE_DIR) {
         $env:LANGFUSE_COMPOSE_DIR
     } else {
-        'C:\Users\abc\langfuse'
+        'C:\path\to\langfuse'
     }
     if (-not (Test-Path -LiteralPath $configuredDir -PathType Container)) {
         throw "Langfuse Compose directory does not exist: $configuredDir"

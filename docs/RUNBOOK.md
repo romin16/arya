@@ -61,7 +61,7 @@ To start device, voice, and Google MCP without core:
 .\deploy\start_all.ps1 -NoCore
 ```
 
-The active Langfuse installation is managed separately. Its scripts use `LANGFUSE_COMPOSE_DIR` (default `C:\Users\abc\langfuse`) and pass that directory and its `.env` explicitly to Compose. They refuse to run if the configured directory resolves inside this repository. Do not create a second Langfuse stack.
+The active Langfuse installation is managed separately. Its scripts use `LANGFUSE_COMPOSE_DIR` (default `C:\path\to\langfuse`) and pass that directory and its `.env` explicitly to Compose. They refuse to run if the configured directory resolves inside this repository. Do not create a second Langfuse stack.
 
 ## 6. First checks
 
