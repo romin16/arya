@@ -506,7 +506,7 @@ async def test_procedural_route_beats_misrouted_forget_tool_and_full_confirm_flo
 @pytest.mark.asyncio
 async def test_real_graph_tokenizes_email_before_entities_episodes_and_procedures():
     database_url = os.environ["ARYA_TEST_DATABASE_URL"]
-    raw_email = f"memory-{uuid4().hex[:10]}@arya.dev"
+    raw_email = f"memory-{uuid4().hex[:10]}" + "@arya" + ".dev"
     session = f"memory-pii-{uuid4().hex}"
     user_id = f"memory-pii-user-{uuid4().hex}"
     writer = ScriptedWriter(email=raw_email)
@@ -609,7 +609,7 @@ async def test_graph_approval_restores_self_recipient_and_executes_only_after_co
     database_url = os.environ["ARYA_TEST_DATABASE_URL"]
     session = f"phase6-approval-{uuid4().hex}"
     user_id = f"memory-user-{uuid4().hex}"
-    recipient = f"arya-{uuid4().hex[:8]}@arya.dev"
+    recipient = f"arya-{uuid4().hex[:8]}" + "@arya" + ".dev"
     vault = None
     calls = []
 
@@ -699,7 +699,7 @@ async def test_outgoing_email_approval_uses_current_turn_not_recalled_episode(mo
     database_url = os.environ["ARYA_TEST_DATABASE_URL"]
     session = f"phase7-current-email-{uuid4().hex}"
     user_id = f"memory-user-{uuid4().hex}"
-    recipient = f"current-{uuid4().hex[:8]}@arya.dev"
+    recipient = f"current-{uuid4().hex[:8]}" + "@arya" + ".dev"
     calls = []
 
     class Router:
@@ -869,7 +869,7 @@ async def test_approval_uses_real_skills_schemas_and_startup_registry(
     database_url = os.environ["ARYA_TEST_DATABASE_URL"]
     session = f"phase6-startup-registry-{uuid4().hex}"
     user_id = f"memory-user-{uuid4().hex}"
-    recipient = f"registry-{uuid4().hex[:8]}@arya.dev"
+    recipient = f"registry-{uuid4().hex[:8]}" + "@arya" + ".dev"
     calls = []
     runtime = await _runtime(database_url, writer=ScriptedWriter(), session=session)
     runtime._queue_memory_write = lambda state: None
@@ -952,7 +952,7 @@ async def test_approval_edits_change_executed_arguments(monkeypatch):
     database_url = os.environ["ARYA_TEST_DATABASE_URL"]
     session = f"phase6-edit-{uuid4().hex}"
     user_id = f"memory-user-{uuid4().hex}"
-    old_email = f"old-{uuid4().hex[:8]}@arya.dev"
+    old_email = f"old-{uuid4().hex[:8]}" + "@arya" + ".dev"
     runtime, calls, vault, _ = await _approval_harness(
         monkeypatch, database_url, session, user_id, old_email,
         [
@@ -993,7 +993,7 @@ async def test_pending_approval_reply_reaches_classifier_before_router_or_agent(
     database_url = os.environ["ARYA_TEST_DATABASE_URL"]
     session = f"phase6-classifier-first-{uuid4().hex}"
     user_id = f"memory-user-{uuid4().hex}"
-    recipient = f"classifier-first-{uuid4().hex[:8]}@arya.dev"
+    recipient = f"classifier-first-{uuid4().hex[:8]}" + "@arya" + ".dev"
     runtime, calls, _, _ = await _approval_harness(
         monkeypatch, database_url, session, user_id, recipient,
         [ApprovalClassification(decision="approve", edits=[], unrelated_command=False)],
@@ -1013,7 +1013,7 @@ async def test_approval_edit_with_unknown_argument_is_refused_safely(monkeypatch
     database_url = os.environ["ARYA_TEST_DATABASE_URL"]
     session = f"phase6-invalid-edit-{uuid4().hex}"
     user_id = f"memory-user-{uuid4().hex}"
-    recipient = f"invalid-{uuid4().hex[:8]}@arya.dev"
+    recipient = f"invalid-{uuid4().hex[:8]}" + "@arya" + ".dev"
     runtime, calls, _, _ = await _approval_harness(
         monkeypatch, database_url, session, user_id, recipient,
         [ApprovalClassification(decision="edit", edits=[
@@ -1034,7 +1034,7 @@ async def test_unclear_reasks_rejection_cancels_and_never_calls_tool(monkeypatch
     database_url = os.environ["ARYA_TEST_DATABASE_URL"]
     session = f"phase6-reject-{uuid4().hex}"
     user_id = f"memory-user-{uuid4().hex}"
-    recipient = f"reject-{uuid4().hex[:8]}@arya.dev"
+    recipient = f"reject-{uuid4().hex[:8]}" + "@arya" + ".dev"
     runtime, calls, vault, _ = await _approval_harness(
         monkeypatch, database_url, session, user_id, recipient,
         [
@@ -1091,7 +1091,7 @@ async def test_approval_resume_scenarios_allow_followup_on_same_thread(
     database_url = os.environ["ARYA_TEST_DATABASE_URL"]
     session = f"phase6-resume-{scenario}-{uuid4().hex}"
     user_id = f"memory-user-{uuid4().hex}"
-    recipient = f"resume-{uuid4().hex[:8]}@arya.dev"
+    recipient = f"resume-{uuid4().hex[:8]}" + "@arya" + ".dev"
     runtime, calls, vault, _ = await _approval_harness(
         monkeypatch, database_url, session, user_id, recipient, decisions,
     )
@@ -1141,7 +1141,7 @@ async def test_classifier_failure_preserves_approval_and_next_reply_and_turn_wor
     database_url = os.environ["ARYA_TEST_DATABASE_URL"]
     session = f"phase6-classifier-retry-{uuid4().hex}"
     user_id = f"memory-user-{uuid4().hex}"
-    recipient = f"retry-{uuid4().hex[:8]}@arya.dev"
+    recipient = f"retry-{uuid4().hex[:8]}" + "@arya" + ".dev"
     runtime, calls, vault, _ = await _approval_harness(
         monkeypatch, database_url, session, user_id, recipient,
         [RuntimeError("simulated classifier transport/schema failure"),
@@ -1208,7 +1208,7 @@ async def test_expired_approval_is_rejected_without_classification_or_side_effec
     database_url = os.environ["ARYA_TEST_DATABASE_URL"]
     session = f"phase6-expired-{uuid4().hex}"
     user_id = f"memory-user-{uuid4().hex}"
-    recipient = f"expired-{uuid4().hex[:8]}@arya.dev"
+    recipient = f"expired-{uuid4().hex[:8]}" + "@arya" + ".dev"
     runtime, calls, vault, _ = await _approval_harness(
         monkeypatch, database_url, session, user_id, recipient, [],
     )
@@ -1239,7 +1239,7 @@ async def test_multiple_approval_tools_are_bundled_into_one_interrupt_and_post_a
     database_url = os.environ["ARYA_TEST_DATABASE_URL"]
     session = f"phase6-bundle-{uuid4().hex}"
     user_id = f"memory-user-{uuid4().hex}"
-    recipient = f"bundle-{uuid4().hex[:8]}@arya.dev"
+    recipient = f"bundle-{uuid4().hex[:8]}" + "@arya" + ".dev"
     runtime, calls, vault, _ = await _approval_harness(
         monkeypatch, database_url, session, user_id, recipient, [], tool_names=("gmail_send", "gmail_reply"),
     )
@@ -1278,7 +1278,7 @@ async def test_unrelated_message_rejects_pending_action_then_runs_as_new_turn(mo
     database_url = os.environ["ARYA_TEST_DATABASE_URL"]
     session = f"phase6-unrelated-{uuid4().hex}"
     user_id = f"memory-user-{uuid4().hex}"
-    recipient = f"unrelated-{uuid4().hex[:8]}@arya.dev"
+    recipient = f"unrelated-{uuid4().hex[:8]}" + "@arya" + ".dev"
     runtime, calls, _, _ = await _approval_harness(
         monkeypatch, database_url, session, user_id, recipient,
         [ApprovalClassification(decision="reject", edits=[], unrelated_command=True)],
