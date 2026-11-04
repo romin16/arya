@@ -138,6 +138,26 @@ unexpected desktop automation would be unsafe.
 See [`docs/RUNBOOK.md`](docs/RUNBOOK.md) for the detailed setup guide and
 [`docs/MIGRATION.md`](docs/MIGRATION.md) for the component migration map.
 
+## Quality and performance
+
+Measured on a Windows PC against the OpenAI API on 2026-11-04 (commit `ee1a818`). Reproduce with:
+`uv run python -m evals.run --models gpt-4o,gpt-4o-mini --live`
+
+| Suite | Cases | gpt-4o-mini | gpt-4o | What it checks |
+|---|---|---|---|---|
+| Tool routing | 18 | 18/18 | 18/18 | Right tool for a spoken command |
+| Memory routing | 46 | 46/46 | 45/46 | Which of the five memory stores to read or write |
+| Approvals | 6 | 6/6 | 6/6 | Risky actions always pause for confirmation |
+| Persona tone | 4 | 4/4 | 4/4 | No banned chatbot phrases |
+| Exact reply | 1 | 1/1 | 1/1 | Follows a plain instruction exactly |
+| Structured schemas | 3 | 3/3 | 3/3 | Strict output schemas accepted by the API |
+
+Median time to the first text chunk of a model call: 656-1,040 ms (gpt-4o-mini) and 848-1,124 ms (gpt-4o), depending on the suite.
+
+Tests: 135 unit tests, plus 35 integration tests that run against a real temporary PostgreSQL database (`scripts/run_postgres_tests.py`).
+
+How to read these numbers: the suites are small regression sets written by the author for this project. They catch regressions (an earlier version of the memory router scored 13/30 on its first live run), but they do not measure real-world accuracy. The one gpt-4o miss is a comparison question it answered without a lookup, which is arguably acceptable. Latency is the model's first chunk in the eval harness, not end-to-end voice latency. Details in [docs/EVALS.md](docs/EVALS.md).
+
 ## Roadmap
 - **Browser automation** (shopping, forms, multi-step web tasks via browser-use): not yet ported. The original service is kept in `legacy/arya_browser_api.py` for reference. Planned: a separate service with its own Chrome profile, exposed as a tool behind the same approval policy.
 - Spotify Web API for true playback state (currently keyboard automation).
