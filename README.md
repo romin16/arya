@@ -132,3 +132,9 @@ unexpected desktop automation would be unsafe.
 
 See [`docs/RUNBOOK.md`](docs/RUNBOOK.md) for the detailed setup guide and
 [`docs/MIGRATION.md`](docs/MIGRATION.md) for the component migration map.
+
+## Roadmap
+- **Browser automation** (shopping, forms, multi-step web tasks via browser-use): not yet ported. The original service is kept in `legacy/arya_browser_api.py` for reference. Planned: a separate service with its own Chrome profile, exposed as a tool behind the same approval policy.
+- Spotify Web API for true playback state (currently keyboard automation).
+- Local speech-to-text (currently Groq Whisper).
+
