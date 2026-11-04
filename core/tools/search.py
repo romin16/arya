@@ -1,6 +1,8 @@
 """Provider-swappable web search with JSON-only compact results."""
 from __future__ import annotations
 
+import logging
+import os
 from pathlib import Path
 from typing import Any
 
@@ -8,47 +10,90 @@ import httpx
 import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
+logger = logging.getLogger("arya.search")
 
 
 class SearchService:
     def __init__(self, client: httpx.AsyncClient, settings: dict[str, Any] | None = None):
         self.client = client
-        self.settings = settings or yaml.safe_load(
+        self.settings = dict(settings) if settings is not None else yaml.safe_load(
             (ROOT / "config" / "search.yaml").read_text(encoding="utf-8")
         )["search"]
+        environment_provider = os.getenv("SEARCH_PROVIDER", "").strip().casefold()
+        if settings is None and environment_provider:
+            self.settings["provider"] = environment_provider
+        selected = str(self.settings.get("provider", "tavily")).casefold()
+        active = next((item for item in self._provider_order(selected) if self._has_key(item)), selected)
+        logger.info("web_search_config provider=%s key_present=%s", active, self._has_key(active))
 
     async def search(self, query: str, n: int = 5) -> dict[str, Any]:
         query = query.strip()
         if not query:
             raise SearchError("Give me a search query first.")
         n = min(max(int(n), 1), 5)
-        provider = str(self.settings.get("provider", "google_cse")).casefold()
-        if provider == "google_cse":
-            try:
-                results = await self._google(query, n)
-                return {"provider": provider, "results": results}
-            except SearchError as exc:
-                if exc.status not in {401, 403, 429}:
-                    raise
-                for fallback in self.settings.get("fallback_providers", []):
-                    if not self._has_key(str(fallback)):
-                        continue
+        provider = str(self.settings.get("provider", "tavily")).casefold()
+        if not self._has_key(provider):
+            for fallback in self._provider_order(provider)[1:]:
+                if self._has_key(fallback):
                     try:
-                        results = await self._provider(str(fallback), query, n)
+                        results = await self._search_provider(fallback, query, n)
                         return {
                             "provider": fallback,
-                            "message": f"Google CSE returned HTTP {exc.status}; showing {fallback} results instead.",
+                            "message": (
+                                f"{provider} is missing {self._missing_configuration(provider)}; "
+                                f"using configured {fallback} instead."
+                            ),
                             "results": results,
                         }
                     except SearchError:
                         continue
-                raise SearchError(
-                    f"Google CSE returned HTTP {exc.status} (quota or permission). "
-                    "Configure TAVILY_API_KEY or BRAVE_SEARCH_API_KEY and list that provider in config/search.yaml."
-                ) from None
+            raise SearchError(
+                f"Web search is unavailable: {provider} requires {self._missing_configuration(provider)}. "
+                "Set SEARCH_PROVIDER to a configured provider or add the named key(s) to .env."
+            )
+        try:
+            results = await self._search_provider(provider, query, n)
+            return {"provider": provider, "results": results}
+        except SearchError as exc:
+            if provider != "google_cse" or exc.status not in {401, 403, 429}:
+                raise
+            for fallback in self._provider_order(provider)[1:]:
+                if not self._has_key(fallback):
+                    continue
+                try:
+                    results = await self._search_provider(fallback, query, n)
+                    return {
+                        "provider": fallback,
+                        "message": f"Google CSE returned HTTP {exc.status}; showing {fallback} results instead.",
+                        "results": results,
+                    }
+                except SearchError:
+                    continue
+            raise SearchError(
+                f"Google CSE returned HTTP {exc.status} (quota or permission). "
+                "Configure TAVILY_API_KEY or BRAVE_SEARCH_API_KEY in .env."
+            ) from None
+
+    def _provider_order(self, selected: str) -> list[str]:
+        configured = [str(item).casefold() for item in self.settings.get("fallback_providers", [])]
+        return list(dict.fromkeys([selected, *configured, "tavily", "google_cse", "brave"]))
+
+    @staticmethod
+    def _missing_configuration(provider: str) -> str:
+        required = {
+            "google_cse": ["GOOGLE_SEARCH_API_KEY", "GOOGLE_SEARCH_ENGINE_ID"],
+            "tavily": ["TAVILY_API_KEY"],
+            "brave": ["BRAVE_SEARCH_API_KEY"],
+        }.get(provider, ["SEARCH_PROVIDER"])
+        missing = [name for name in required if not os.getenv(name)]
+        return " and ".join(missing or required)
+
+    async def _search_provider(self, provider: str, query: str, n: int) -> list[dict[str, str]]:
+        if provider == "google_cse":
+            return await self._google(query, n)
         if provider not in {"tavily", "brave"}:
             raise SearchError(f"Unsupported search.provider setting: {provider}.")
-        return {"provider": provider, "results": await self._provider(provider, query, n)}
+        return await self._provider(provider, query, n)
 
     def _has_key(self, provider: str) -> bool:
         import os

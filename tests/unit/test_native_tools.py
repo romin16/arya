@@ -4,6 +4,7 @@ from pathlib import Path
 import httpx
 import pytest
 import yaml
+import logging
 
 from core.tools.calculator import calculate
 from core.tools.search import SearchError, SearchService
@@ -15,6 +16,45 @@ def test_default_search_provider_is_tavily():
         (Path(__file__).resolve().parents[2] / "config" / "search.yaml").read_text(encoding="utf-8")
     )["search"]
     assert settings["provider"] == "tavily"
+
+
+@pytest.mark.asyncio
+async def test_tavily_without_key_falls_back_to_configured_google_cse(monkeypatch):
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+    monkeypatch.setenv("GOOGLE_SEARCH_API_KEY", "mock-cse-key")
+    monkeypatch.setenv("GOOGLE_SEARCH_ENGINE_ID", "mock-engine")
+
+    async def handler(request: httpx.Request):
+        assert request.url.host == "www.googleapis.com"
+        return httpx.Response(200, json={"items": [
+            {"title": "Example result", "link": "https://example.org", "snippet": "A snippet"},
+        ]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await SearchService(
+            client, {"provider": "tavily", "fallback_providers": []},
+        ).search("query")
+
+    assert result["provider"] == "google_cse"
+    assert "TAVILY_API_KEY" in result["message"]
+    assert result["results"] == [{
+        "title": "Example result", "url": "https://example.org", "snippet": "A snippet",
+    }]
+
+
+@pytest.mark.asyncio
+async def test_search_provider_env_selects_and_logs_only_provider_key_presence(monkeypatch, caplog):
+    for name in ("TAVILY_API_KEY", "GOOGLE_SEARCH_API_KEY", "GOOGLE_SEARCH_ENGINE_ID", "BRAVE_SEARCH_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("SEARCH_PROVIDER", "brave")
+    caplog.set_level(logging.INFO, logger="arya.search")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _request: pytest.fail("no key; no request"))) as client:
+        service = SearchService(client)
+        assert service.settings["provider"] == "brave"
+        with pytest.raises(SearchError, match="BRAVE_SEARCH_API_KEY"):
+            await service.search("query")
+    assert "web_search_config provider=brave key_present=False" in caplog.text
+    assert "mock" not in caplog.text
 
 
 def test_calculator_evaluates_arithmetic_without_python_eval():

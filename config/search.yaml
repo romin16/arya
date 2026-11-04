@@ -1,5 +1,5 @@
 search:
   provider: tavily
   fallback_providers:
-    - tavily
+    - google_cse
     - brave
