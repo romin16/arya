@@ -9,7 +9,7 @@ This repository replaces the prior workflow orchestration and service layout wit
 | Voice Flask server and command-line helpers | Async FastAPI voice service | Provider calls are asynchronous; speech output is PII-masked before provider requests. |
 | Hosted chat memory and separate legacy stores | PostgreSQL checkpointing and five fresh memory stores | No automatic historical memory import. New memory is PII-tokenised before storage. |
 | Legacy contacts and unsupported agent actions | Google Contacts MCP and currently registered typed tools | Only Gmail, Calendar, and Contacts tools are exposed from the Google MCP process. |
-| Existing browser frontend protocol | `/chat` SSE response contract on the local core | Tested against the parser in `legacy/arya.html`; the legacy source is not modified. |
+| Existing browser frontend protocol | `/chat` SSE response contract on the local core | Tested against the parser in `frontend/arya.html`; `legacy/arya.html` remains unchanged as historical source. |
 
 ## Fresh database and upgrade path
 

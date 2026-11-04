@@ -1,4 +1,4 @@
-"""Replay the core SSE payloads against the contract consumed by legacy/arya.html."""
+"""Replay the core SSE payloads against the contract consumed by frontend/arya.html."""
 import json
 from pathlib import Path
 
@@ -20,8 +20,8 @@ def _decode_sse(body: str) -> list[dict]:
 
 
 @pytest.mark.asyncio
-async def test_sse_replay_matches_legacy_frontend_success_and_error_contract():
-    frontend = (ROOT / "legacy" / "arya.html").read_text(encoding="utf-8")
+async def test_sse_replay_matches_frontend_success_and_error_contract():
+    frontend = (ROOT / "frontend" / "arya.html").read_text(encoding="utf-8")
     parser = frontend[frontend.index("if (d.session_id)"):frontend.index("} catch(e) { /* skip malformed lines */ }")]
     for field in ("session_id", "chunk", "activity", "done"):
         assert f"d.{field}" in parser

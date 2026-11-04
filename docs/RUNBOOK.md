@@ -73,7 +73,7 @@ Invoke-RestMethod http://127.0.0.1:5001/health
 Invoke-RestMethod -Headers @{ Authorization = "Bearer $env:DEVICE_TOKEN" } http://127.0.0.1:5002/health
 ```
 
-Open the existing `legacy/arya.html` frontend locally. Try an exact-reply request, a weather query with a named location, and harmless Spotify play/pause actions. For approval testing, use only an email to yourself or a non-production test contact; verify the approval question before approving. Never use a real recipient for destructive or external tests.
+Serve `frontend/` with `scripts/serve_frontend.ps1` and open `http://localhost:8080`. Try an exact-reply request, a weather query with a named location, and harmless Spotify play/pause actions. For approval testing, use only an email to yourself or a non-production test contact; verify the approval question before approving. Never use a real recipient for destructive or external tests.
 
 ## Search provider
 

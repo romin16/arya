@@ -16,3 +16,6 @@ temp_*.py
 .uv-cache/
 
 .vscode/
+
+frontend/config.local.js
+*.ppn

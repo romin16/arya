@@ -19,7 +19,7 @@ Status: **implemented; verification recorded below**. This phase adds PII-safe o
   | Structured schemas | 3/3 | 3/3 |
 
   The two gpt-4o memory-routing misses were `general_knowledge` (`episode_read` returned `entity_read`) and `standing_rule` (`knowledge_read` returned `none`). The all-suite command therefore returned exit code 1. No tool actions were executed; routing tools were inert and all non-OpenAI network calls were mocked.
-- SSE: `tests/unit/test_sse_frontend_contract.py` replays success and error events through `/chat`, checks event order and shapes, and checks the event fields consumed by `legacy/arya.html`.
+- SSE: `tests/unit/test_sse_frontend_contract.py` replays success and error events through `/chat`, checks event order and shapes, and checks the event fields consumed by `frontend/arya.html`.
 - Extras: `scripts/sync.ps1` uses the lockfile and installs voice, device, and observability extras; `deploy/start_all.ps1` invokes it. Voice and device report the missing extra clearly.
 - Cutover/docs: `scripts/`, `config/`, and `docs/` contain no orchestration-service references. `legacy/` remains unchanged. `docs/RUNBOOK.md` and this `docs/MIGRATION.md` document fresh setup, migrations, services, and rollback references.
 - STT filter: configured short/quiet hallucination filtering for “Thank you”, “Thanks for watching”, and “you” exists in `voice/stt_filter.py`, `config/voice.yaml`, and unit tests.
